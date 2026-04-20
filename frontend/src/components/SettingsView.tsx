@@ -5264,9 +5264,9 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
                   {/* Header */}
                   <div className="flex w-full flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
                     <div className="w-full text-left sm:w-auto">
-                      <div className="text-2xl font-black text-gray-900 tracking-tighter leading-tight mb-1">OpenClaw</div>
+                      <div className="text-2xl font-black text-gray-900 tracking-tighter leading-tight mb-1">MingYuan</div>
                       <div className="flex items-baseline gap-2 whitespace-nowrap leading-none">
-                        <div className="text-[1.15rem] font-bold text-gray-400 tracking-widest uppercase leading-tight">CHAT GATEWAY</div>
+                        <div className="text-[1.15rem] font-bold text-gray-400 tracking-widest uppercase leading-tight">SmartOffice</div>
                         <div className="text-[0.8rem] font-medium text-gray-400 leading-none">
                           {isLoadingAppVersion
                             ? t('settings.about.loadingVersion')
