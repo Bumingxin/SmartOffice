@@ -1,0 +1,17 @@
+[Unit]
+Description=ClawUI Service
+After=network.target
+
+[Service]
+Type=simple
+Environment=PORT=3456
+Environment=NODE_ENV=production
+Environment=PATH=%h/.npm-global/bin:%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=CLAWUI_DATA_DIR=.clawui_release
+WorkingDirectory=%h/SmartOffice/backend
+ExecStart=/usr/bin/node dist/index.js
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
