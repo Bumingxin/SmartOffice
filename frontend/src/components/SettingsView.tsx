@@ -679,7 +679,7 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
   // --- General settings state ---
   const [aiName, setAiName] = useState(() => t('settings.general.aiNamePlaceholder'));
   const [loginEnabled, setLoginEnabled] = useState(false);
-  const [loginPassword, setLoginPassword] = useState('123456');
+  const [loginPassword, setLoginPassword] = useState('admin123');
   const [showLoginPassword, setShowLoginPassword] = useState(false);
   const [generalSaved, setGeneralSaved] = useState(false);
   const [generalError, setGeneralError] = useState(false);
