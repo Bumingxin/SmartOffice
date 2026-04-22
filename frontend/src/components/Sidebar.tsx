@@ -1222,7 +1222,7 @@ export default function Sidebar({
           onClick={() => navigateTo(currentView, settingsTab, false)} 
         />
       )}
-      <aside className={`fixed inset-y-0 left-0 z-50 w-[75vw] md:w-64 flex-shrink-0 flex-col border-r border-gray-200 bg-gray-100 h-full transition-transform duration-300 md:relative md:translate-x-0 md:flex ${isMobileMenuOpen ? 'translate-x-0 flex' : '-translate-x-full hidden'}`}>
+      <aside className={`fixed inset-y-0 left-0 z-50 w-[75vw] md:w-64 flex-shrink-0 flex-col border-r border-bule-200 bg-blue-50 h-full transition-transform duration-300 md:relative md:translate-x-0 md:flex ${isMobileMenuOpen ? 'translate-x-0 flex' : '-translate-x-full hidden'}`}>
         <SidebarHeader
           openclawVersion={appVersionInfo?.openclawVersion || ''}
           appVersion={appVersionInfo?.version || ''}
@@ -1296,7 +1296,7 @@ export default function Sidebar({
             : renderFavoritesList()}
       </div>
 
-      <div className="p-4 border-t border-gray-100 bg-gray-100/50 space-y-1">
+      <div className="p-4 border-t border-gray-100 bg-blue-100/50 space-y-1">
         <button
           onClick={() => navigateTo('settings')}
           className="flex items-center w-full py-3 px-4 text-gray-600 hover:text-gray-900 hover:font-semibold transition-colors font-normal text-sm rounded-xl hover:bg-gray-200 gap-3"
@@ -1592,7 +1592,7 @@ export default function Sidebar({
                 </div>
 
                 <div className="flex-1 flex flex-col min-h-0 border border-gray-100 rounded-2xl overflow-hidden mt-2 bg-gray-50/30">
-                  <div className="flex p-1 bg-gray-100/50 gap-1 overflow-x-auto no-scrollbar">
+                  <div className="flex p-1 bg-blue-100/50 gap-1 overflow-x-auto no-scrollbar">
                     {[
                       { id: 'soul', name: t('sidebar.tabSoul') },
                       { id: 'user', name: t('sidebar.tabUser') },
@@ -1711,7 +1711,7 @@ export default function Sidebar({
 
                 {/* MD Files tab+editor - read-only */}
                 <div className="flex-1 flex flex-col min-h-0 border border-gray-100 rounded-2xl overflow-hidden bg-gray-50/30">
-                  <div className="flex p-1 bg-gray-100/50 gap-1 overflow-x-auto no-scrollbar">
+                  <div className="flex p-1 bg-blue-100/50 gap-1 overflow-x-auto no-scrollbar">
                     {[
                       { id: 'soul', name: t('sidebar.tabSoul'), content: viewingSession.soulContent },
                       { id: 'user', name: t('sidebar.tabUser'), content: viewingSession.userContent },
@@ -2026,7 +2026,7 @@ export default function Sidebar({
                   {/* Unified tab+editor — same style as the soul/agents file editor */}
                   <div className="flex-1 flex flex-col min-h-0 border border-gray-100 rounded-2xl overflow-hidden mt-2 bg-gray-50/30">
                     {/* Tab bar */}
-                    <div className="flex p-1 bg-gray-100/50 gap-1 overflow-x-auto no-scrollbar">
+                    <div className="flex p-1 bg-blue-100/50 gap-1 overflow-x-auto no-scrollbar">
                       {selectedGroupMembers.map(m => {
                          const activeMember = selectedGroupMembers.find(member => member.agentId === activeRoleTab) || selectedGroupMembers[0];
                          const isActive = activeMember.agentId === m.agentId;
@@ -2204,7 +2204,7 @@ export default function Sidebar({
                 <div>
                   <label className="block text-sm font-semibold text-gray-700 mb-2">{t('chat.members')}</label>
                   <div className="flex-1 flex flex-col min-h-0 border border-gray-100 rounded-2xl overflow-hidden bg-gray-50/30">
-                    <div className="flex p-1 bg-gray-100/50 gap-1 overflow-x-auto no-scrollbar">
+                    <div className="flex p-1 bg-blue-100/50 gap-1 overflow-x-auto no-scrollbar">
                       {viewingGroup.members?.map((m: any) => {
                          const activeMember = viewingGroup.members.find((member: any) => member.agent_id === infoActiveRoleTab) || viewingGroup.members[0];
                          const isActive = activeMember.agent_id === m.agent_id;
