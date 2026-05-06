@@ -10,6 +10,7 @@ import {
   extractSettledAssistantOutcome,
   getHistoryTailActivity,
   getHistorySnapshot,
+  getUnknownHistorySnapshot,
   isNonTerminalAssistantMessage,
   shouldPreferSettledAssistantText,
 } from './chat-history-reconciliation';
@@ -35,6 +36,7 @@ import { rewriteVisibleFileLinks } from './file-link-rewrite';
 import { getGroupRuntimeSessionKey } from './group-workspace';
 import { selectPreferredTextSnapshot } from './text-snapshot-protection';
 import { canonicalizeAssistantWorkspaceArtifacts } from './workspace-artifact-rewrite';
+import { shouldUseConfiguredImageGenerationModel } from './image-generation-routing';
 
 const DEFAULT_MAX_CHAIN_DEPTH = 6;
 const GROUP_STREAM_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
@@ -98,13 +100,29 @@ type PendingGroupRun = {
   processStreaming: boolean;
 };
 
+type GroupDirectImageGenerationResult = {
+  content: string;
+  processContent: string;
+  modelUsed: string;
+  imagePath: string;
+};
+
+export type GroupDirectImageGenerationHandler = (params: {
+  prompt: string;
+  intentText?: string;
+  intentContext?: Array<string | null | undefined> | string | null;
+  outputDir: string;
+}) => Promise<GroupDirectImageGenerationResult | null>;
+
+export type GroupDirectImageGenerationStartProcessBuilder = () => string | null;
+
 type SplitGroupProcessOutputResult = {
   finalContent: string;
   processContent: string;
   processStreaming: boolean;
 };
 
-type GroupToolProgressLocale = 'zh-CN' | 'zh-TW' | 'en';
+export type GroupToolProgressLocale = 'zh-CN' | 'zh-TW' | 'en';
 
 type GroupToolProgressKind =
   | 'browse'
@@ -118,7 +136,7 @@ type GroupToolProgressKind =
   | 'view_image'
   | 'wait_agent';
 
-type GroupToolProgressState = {
+export type GroupToolProgressState = {
   toolName: string;
   args?: Record<string, unknown>;
 };
@@ -226,7 +244,7 @@ function normalizeGroupPromptText(value: string): string {
     .trim();
 }
 
-function normalizeGroupToolProgressLocale(value?: string | null): GroupToolProgressLocale {
+export function normalizeGroupToolProgressLocale(value?: string | null): GroupToolProgressLocale {
   return value === 'zh-TW' || value === 'en' ? value : 'zh-CN';
 }
 
@@ -249,7 +267,7 @@ function truncateGroupToolProgressText(value: string, maxChars = GROUP_TOOL_PROG
   return `${normalized.slice(0, Math.max(1, maxChars - 1)).trimEnd()}…`;
 }
 
-function normalizeToolArgsRecord(args: unknown): Record<string, unknown> | undefined {
+export function normalizeToolArgsRecord(args: unknown): Record<string, unknown> | undefined {
   return args && typeof args === 'object' && !Array.isArray(args)
     ? args as Record<string, unknown>
     : undefined;
@@ -374,7 +392,7 @@ function buildToolProgressLine(locale: GroupToolProgressLocale, label: string, d
   return normalizedDetail ? `- ${label}${separator}${normalizedDetail}` : `- ${label}`;
 }
 
-function formatToolStartProgress(locale: GroupToolProgressLocale, toolName: string, args?: Record<string, unknown>): string {
+export function formatToolStartProgress(locale: GroupToolProgressLocale, toolName: string, args?: Record<string, unknown>): string {
   const text = GROUP_TOOL_PROGRESS_TEXT[locale];
   const detail = resolveToolProgressDetail(toolName, args);
 
@@ -402,7 +420,7 @@ function formatToolStartProgress(locale: GroupToolProgressLocale, toolName: stri
   }
 }
 
-function formatToolResultProgress(locale: GroupToolProgressLocale, toolName: string, args: Record<string, unknown> | undefined, isError: boolean): string {
+export function formatToolResultProgress(locale: GroupToolProgressLocale, toolName: string, args: Record<string, unknown> | undefined, isError: boolean): string {
   const text = GROUP_TOOL_PROGRESS_TEXT[locale];
   const detail = resolveToolProgressDetail(toolName, args);
 
@@ -437,7 +455,7 @@ function formatToolResultProgress(locale: GroupToolProgressLocale, toolName: str
   }
 }
 
-function appendToolProgressLine(lines: string[], line: string): boolean {
+export function appendToolProgressLine(lines: string[], line: string): boolean {
   const normalizedLine = line.trim();
   if (!normalizedLine) return false;
   if (lines[lines.length - 1] === normalizedLine) {
@@ -449,14 +467,6 @@ function appendToolProgressLine(lines: string[], line: string): boolean {
     lines.splice(0, lines.length - GROUP_TOOL_PROGRESS_MAX_LINES);
   }
   return true;
-}
-
-function mergeGroupProcessContent(...sections: Array<string | null | undefined>): string {
-  return sections
-    .map((section) => normalizeGroupPromptText(section || ''))
-    .filter(Boolean)
-    .join('\n\n')
-    .trim();
 }
 
 function resolveConfiguredProcessTagPair(
@@ -801,7 +811,11 @@ export class GroupChatEngine extends EventEmitter {
       workspacePath: string;
       uploadsPath: string;
       outputPath: string;
+      bootstrapContext?: string;
   }>;
+  private canUseHostTakeover: (agentId: string) => boolean;
+  private tryGenerateImageForPrompt?: GroupDirectImageGenerationHandler;
+  private buildImageGenerationStartProcessContent?: GroupDirectImageGenerationStartProcessBuilder;
   private pendingRuns = new Map<string, PendingGroupRun>();
   private activeRuns = new Map<string, ActiveGroupRun>();
 
@@ -815,7 +829,11 @@ export class GroupChatEngine extends EventEmitter {
       workspacePath: string;
       uploadsPath: string;
       outputPath: string;
-    }>
+      bootstrapContext?: string;
+    }>,
+    tryGenerateImageForPrompt?: GroupDirectImageGenerationHandler,
+    buildImageGenerationStartProcessContent?: GroupDirectImageGenerationStartProcessBuilder,
+    canUseHostTakeover?: (agentId: string) => boolean,
   ) {
     super();
     this.db = db;
@@ -823,6 +841,9 @@ export class GroupChatEngine extends EventEmitter {
     this.getAgentModel = getAgentModel;
     this.getPreferredLanguage = getPreferredLanguage;
     this.prepareGroupRuntime = prepareGroupRuntime;
+    this.tryGenerateImageForPrompt = tryGenerateImageForPrompt;
+    this.buildImageGenerationStartProcessContent = buildImageGenerationStartProcessContent;
+    this.canUseHostTakeover = canUseHostTakeover || (() => isGroupHostTakeoverEnabled());
   }
 
   private emitRunState(groupId: string) {
@@ -1119,7 +1140,7 @@ export class GroupChatEngine extends EventEmitter {
       parts.push(groupDesc);
     }
 
-    if (isGroupHostTakeoverEnabled()) {
+    if (this.canUseHostTakeover(member.agent_id)) {
       parts.push(buildGroupHostTakeoverPrompt());
     }
 
@@ -1400,7 +1421,8 @@ export class GroupChatEngine extends EventEmitter {
       const rewrittenTrigger = isResetCommand
         ? { text: triggerMsg, attachments: [] as MessageAttachment[], linkedUploads: [] as WorkspaceUploadLink[] }
         : rewriteMessageWithWorkspaceUploads(triggerMsg, runtimeContext.uploadsPath, { extractImageAttachments: true });
-      if (!isResetCommand && isGroupHostTakeoverEnabled() && hasDocumentUploads(rewrittenTrigger.linkedUploads)) {
+      const canUseHostTakeover = this.canUseHostTakeover(agentId);
+      if (!isResetCommand && canUseHostTakeover && hasDocumentUploads(rewrittenTrigger.linkedUploads)) {
         try {
           await ensureManagedDocumentToolingReady();
         } catch (error) {
@@ -1413,7 +1435,7 @@ export class GroupChatEngine extends EventEmitter {
         : buildImageUploadInspectionContext(rewrittenTrigger.linkedUploads);
       const documentToolingContext = isResetCommand
         ? ''
-        : buildDocumentToolingContext(rewrittenTrigger.linkedUploads);
+        : (canUseHostTakeover ? buildDocumentToolingContext(rewrittenTrigger.linkedUploads) : '');
       const audioTranscriptContext = isResetCommand
         ? ''
         : buildAudioTranscriptContext(
@@ -1421,6 +1443,62 @@ export class GroupChatEngine extends EventEmitter {
         );
       this.throwIfGroupReset(groupId, effectiveResetEpoch);
       const promptInput = [rewrittenTrigger.text, imageInspectionContext, documentToolingContext, audioTranscriptContext].filter(Boolean).join('\n\n').trim();
+
+      const imageIntentContext = runtimeContext.bootstrapContext || '';
+      const imageGenerationStartProcessContent = !isResetCommand && shouldUseConfiguredImageGenerationModel(triggerMsg, imageIntentContext)
+        ? this.buildImageGenerationStartProcessContent?.()
+        : null;
+      if (imageGenerationStartProcessContent && msgId !== undefined) {
+        latestProcessOutput = imageGenerationStartProcessContent;
+        this.db.updateGroupMessage(msgId, '', modelUsed, null, imageGenerationStartProcessContent);
+        this.emit('edit', {
+          groupId,
+          id: msgId,
+          parent_id: parentId,
+          sender_type: 'agent',
+          sender_id: agentId,
+          sender_name: member.display_name,
+          content: '',
+          process_content: rewriteVisibleFileLinks(imageGenerationStartProcessContent, { workspacePath: runtimeContext.workspacePath }).trim(),
+          process_streaming: true,
+          model_used: modelUsed,
+          created_at: placeholderCreatedAt,
+        });
+      }
+
+      const directImageResult = !isResetCommand && this.tryGenerateImageForPrompt
+        ? await this.tryGenerateImageForPrompt({
+          prompt: promptInput,
+          intentText: triggerMsg,
+          intentContext: imageIntentContext,
+          outputDir: runtimeContext.outputPath,
+        })
+        : null;
+      if (directImageResult && msgId !== undefined) {
+        this.throwIfGroupReset(groupId, effectiveResetEpoch);
+        latestProcessOutput = directImageResult.processContent;
+        this.db.updateGroupMessage(
+          msgId,
+          directImageResult.content,
+          directImageResult.modelUsed,
+          null,
+          directImageResult.processContent,
+        );
+        this.emit('edit', {
+          groupId,
+          id: msgId,
+          parent_id: parentId,
+          sender_type: 'agent',
+          sender_id: agentId,
+          sender_name: member.display_name,
+          content: rewriteVisibleFileLinks(directImageResult.content, { workspacePath: runtimeContext.workspacePath }).trim(),
+          process_content: rewriteVisibleFileLinks(directImageResult.processContent, { workspacePath: runtimeContext.workspacePath }).trim(),
+          process_streaming: false,
+          model_used: directImageResult.modelUsed,
+          created_at: placeholderCreatedAt,
+        });
+        return msgId;
+      }
 
       const prompt = isResetCommand 
         ? triggerMsg
@@ -1457,7 +1535,7 @@ export class GroupChatEngine extends EventEmitter {
         : `agent:${runtimeContext.runtimeAgentId}:chat:${sessionKey}`;
       const preRunHistorySnapshot = await client.getChatHistory(expectedSessionKey, GROUP_HISTORY_COMPLETION_PROBE_LIMIT)
         .then((history) => getHistorySnapshot(history))
-        .catch(() => ({ length: 0, latestSignature: '' }));
+        .catch(() => getUnknownHistorySnapshot());
       this.throwIfGroupReset(groupId, effectiveResetEpoch);
 
       // Start streaming response
@@ -1539,7 +1617,7 @@ export class GroupChatEngine extends EventEmitter {
         };
 
         const syncCombinedProcessState = () => {
-          const combinedProcessOutput = mergeGroupProcessContent(toolProcessOutput, processOutput);
+          const combinedProcessOutput = toolProcessOutput;
           const combinedProcessStreaming = modelProcessStreaming || activeToolCallIds.size > 0;
           latestProcessOutput = combinedProcessOutput;
           this.updateActiveRunOutput(groupId, runId, {
@@ -1996,11 +2074,20 @@ export class GroupChatEngine extends EventEmitter {
         finalEventText,
       );
       const splitProtectedResponse = splitGroupProcessOutput(protectedResponse, processStartTag, processEndTag);
-      const canonicalResponse = canonicalizeAssistantWorkspaceArtifacts(splitProtectedResponse.finalContent, {
+      let canonicalResponse = canonicalizeAssistantWorkspaceArtifacts(splitProtectedResponse.finalContent, {
         workspacePath: runtimeContext.workspacePath,
         startedAtMs: runStartedAt,
       });
-      const canonicalProcessContent = selectPreferredTextSnapshot(latestProcessOutput, splitProtectedResponse.processContent);
+      let canonicalProcessContent = latestProcessOutput;
+      if (!canonicalResponse.trim()) {
+        const canonicalFallbackResponse = canonicalizeAssistantWorkspaceArtifacts(splitProtectedResponse.processContent, {
+          workspacePath: runtimeContext.workspacePath,
+          startedAtMs: runStartedAt,
+        });
+        if (canonicalFallbackResponse.trim()) {
+          canonicalResponse = canonicalFallbackResponse;
+        }
+      }
       latestProcessOutput = canonicalProcessContent;
       const mentionedIds = this.parseMentions(canonicalResponse, members);
       if (!canonicalResponse.trim() && msgId !== undefined) {
