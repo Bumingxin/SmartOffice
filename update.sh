@@ -55,7 +55,8 @@ git clean -fd
 
 emit_phase "deploy-release"
 echo "开始升级端口 $TARGET_PORT 的服务..."
-bash deploy-release.sh "$TARGET_PORT"
+chmod +x deploy-release.sh
+./deploy-release.sh "$TARGET_PORT"
 
 emit_phase "complete"
 echo "================================================"
