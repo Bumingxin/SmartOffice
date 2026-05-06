@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, Fragment, type ChangeEvent } from 'react';
-import { Eye, EyeOff, Check, X, Loader2, Edit2, Trash2, Plus, Menu, Github, Send, ShoppingBag, Activity, Globe, Zap, Wrench, ArrowUpDown, Link2, ChevronDown, Image as ImageIcon } from 'lucide-react';
+import { Eye, EyeOff, Check, X, Loader2, Edit2, Trash2, Plus, Menu, Activity, Globe, Zap, Wrench, ArrowUpDown, Link2, ChevronDown, Image as ImageIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { SettingsTab } from '../App';
 import { applyLanguagePreference, normalizeLanguage, type SupportedLanguage } from '../i18n';
@@ -5558,9 +5558,9 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
                   {/* Header */}
                   <div className="flex w-full flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
                     <div className="w-full text-left sm:w-auto">
-                      <div className="text-2xl font-black text-gray-900 tracking-tighter leading-tight mb-1">OpenClaw</div>
+                      <div className="text-2xl font-black text-gray-900 tracking-tighter leading-tight mb-1">MingYuan</div>
                       <div className="flex items-baseline gap-2 whitespace-nowrap leading-none">
-                        <div className="text-[1.15rem] font-bold text-gray-400 tracking-widest uppercase leading-tight">CHAT GATEWAY</div>
+                        <div className="text-[1.15rem] font-bold text-gray-400 tracking-widest uppercase leading-tight">SmartOffice</div>
                         <div className="text-[0.8rem] font-medium text-gray-400 leading-none">
                           {isLoadingAppVersion
                             ? t('settings.about.loadingVersion')
@@ -5589,61 +5589,7 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
                     </div>
                   )}
 
-                  {/* Author Info */}
-                  <div className="w-full text-center text-xl font-medium leading-8 text-gray-700">
-                    {t('settings.about.authorName')}
-                  </div>
 
-                  {/* Links Row */}
-                  <div className="flex flex-wrap items-center justify-center gap-x-6 gap-y-4">
-                    <a 
-                      href="https://github.com/liandu2024/OpenClaw-Chat-Gateway" 
-                      target="_blank" 
-                      rel="noreferrer"
-                      className="flex items-center gap-2 text-[#3b82f6] hover:text-blue-700 transition-colors group text-[13px] sm:text-[15px] font-medium"
-                    >
-                      <Github className="w-5 h-5 text-gray-900 group-hover:-translate-y-0.5 transition-transform" />
-                      <span>Github</span>
-                    </a>
-                  <a 
-                    href="https://t.me/angeworld2024" 
-                    target="_blank" 
-                    rel="noreferrer"
-                    className="flex items-center gap-2 text-[#3b82f6] hover:text-blue-700 transition-colors group text-[13px] sm:text-[15px] font-medium"
-                  >
-                    <Send className="w-5 h-5 text-[#3b82f6] group-hover:-translate-y-0.5 transition-transform" />
-                    <span>{t('settings.about.tgGroup')}</span>
-                  </a>
-                  <a 
-                    href="https://blog.angeworld.cc/market" 
-                    target="_blank" 
-                    rel="noreferrer"
-                    className="flex items-center gap-2 text-[#3b82f6] hover:text-blue-700 transition-colors group text-[13px] sm:text-[15px] font-medium"
-                  >
-                    <ShoppingBag className="w-5 h-5 text-[#ef4444] group-hover:-translate-y-0.5 transition-transform" />
-                    <span>{t('settings.about.market')}</span>
-                  </a>
-                </div>
-
-                {/* API Button Row */}
-                <div className="w-full flex flex-col items-center gap-3 px-2">
-                  <a 
-                    href="https://ai.opendoor.cn" 
-                    target="_blank" 
-                    rel="noreferrer"
-                    className="flex items-center justify-center px-6 py-2.5 rounded-xl sm:rounded-full bg-[#fefce8] border border-blue-300 text-[#3b82f6] hover:bg-yellow-100 hover:border-blue-400 transition-all font-bold text-[11px] min-[380px]:text-[12px] sm:text-[14px] max-w-full text-center"
-                  >
-                    {t('settings.about.openDoorApiLabel')}
-                  </a>
-                  <a 
-                    href="https://ai.superdoor.top/register?promo=ANGEWORLD" 
-                    target="_blank" 
-                    rel="noreferrer"
-                    className="flex items-center justify-center px-6 py-2.5 rounded-xl sm:rounded-full bg-[#fefce8] border border-blue-300 text-[#3b82f6] hover:bg-yellow-100 hover:border-blue-400 transition-all font-bold text-[11px] min-[380px]:text-[12px] sm:text-[14px] max-w-full text-center"
-                  >
-                    {t('settings.about.superDoorApiLabel')}
-                  </a>
-                </div>
 
                   </div>
               </div>
