@@ -7,6 +7,8 @@ import {
 export type ChatHistorySnapshot = {
   length: number;
   latestSignature: string;
+  messageSignatures?: string[];
+  trusted?: boolean;
 };
 
 export type SettledAssistantOutcome =
@@ -70,6 +72,7 @@ function getMessageTimestampMs(message: any): number | null {
 }
 
 function hasHistoryTailChanges(messages: any[], baseline: ChatHistorySnapshot): boolean {
+  if (baseline.trusted === false) return false;
   if (messages.length === 0) return false;
   const latestMessage = messages[messages.length - 1];
   return messages.length > baseline.length
@@ -140,6 +143,17 @@ export function getHistorySnapshot(historyPayload: any): ChatHistorySnapshot {
   return {
     length: messages.length,
     latestSignature: createHistoryMessageSignature(latestMessage),
+    messageSignatures: messages.map((message: any) => createHistoryMessageSignature(message)).filter(Boolean),
+    trusted: true,
+  };
+}
+
+export function getUnknownHistorySnapshot(): ChatHistorySnapshot {
+  return {
+    length: 0,
+    latestSignature: '',
+    messageSignatures: [],
+    trusted: false,
   };
 }
 
@@ -172,21 +186,36 @@ export function extractSettledAssistantOutcome(historyPayload: any, baseline: Ch
 }
 
 export function extractSettledAssistantOutcomeRecord(historyPayload: any, baseline: ChatHistorySnapshot): AssistantOutcomeRecord {
+  if (baseline.trusted === false) {
+    return { kind: 'none', timestampMs: null };
+  }
+
   const messages = Array.isArray(historyPayload?.messages) ? historyPayload.messages : [];
   if (!hasHistoryTailChanges(messages, baseline)) {
     return { kind: 'none', timestampMs: null };
   }
 
+  const baselineSignatures = new Set((baseline.messageSignatures || []).filter(Boolean));
+  if (baseline.latestSignature) {
+    baselineSignatures.add(baseline.latestSignature);
+  }
+
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
-    if (baseline.latestSignature && createHistoryMessageSignature(message) === baseline.latestSignature) {
+    const signature = createHistoryMessageSignature(message);
+    if (baselineSignatures.has(signature)) {
       break;
     }
 
-    const outcome = getAssistantOutcomeRecord(message);
-    if (outcome.kind !== 'none') {
-      return outcome;
+    const normalizedMessage = normalizeOpenClawMessageRecord(message);
+    if (normalizedMessage?.role !== 'assistant') {
+      continue;
     }
+
+    // Only trust the newest assistant record after the run baseline.
+    // If it is still a tool-use/intermediate assistant message, wait for the
+    // terminal record instead of falling back to an older assistant reply.
+    return getAssistantOutcomeRecord(normalizedMessage);
   }
 
   return { kind: 'none', timestampMs: null };
