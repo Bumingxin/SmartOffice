@@ -273,7 +273,7 @@ function hasExplicitProcessState(incoming: Partial<ChatMessage>): boolean {
     && typeof incoming.processContent === 'string'
     && incoming.processContent.trim().length > 0;
   const hasProcessStreaming = hasOwnMessageField(incoming, 'processStreaming')
-    && incoming.processStreaming === true;
+    && typeof incoming.processStreaming === 'boolean';
   return hasProcessContent || hasProcessStreaming;
 }
 
@@ -342,13 +342,20 @@ function shouldPreferIncomingMessageContent(
   return normalizedNext.length > normalizedCurrent.length;
 }
 
-function shouldPreferIncomingSupplementalContent(currentValue: string | undefined, nextValue: string | undefined): boolean {
+function shouldPreferIncomingSupplementalContent(
+  currentValue: string | undefined,
+  nextValue: string | undefined,
+  options?: { allowShorterReplacement?: boolean },
+): boolean {
   const currentContent = typeof currentValue === 'string' ? currentValue : '';
   const nextContent = typeof nextValue === 'string' ? nextValue : '';
   const normalizedCurrent = currentContent.trim();
   const normalizedNext = nextContent.trim();
 
   if (!normalizedNext) {
+    if (options?.allowShorterReplacement) {
+      return true;
+    }
     return !normalizedCurrent;
   }
 
@@ -369,10 +376,16 @@ function shouldPreferIncomingSupplementalContent(currentValue: string | undefine
   }
 
   if (normalizedCurrent.startsWith(normalizedNext)) {
-    return false;
+    return !!options?.allowShorterReplacement;
   }
 
   return normalizedNext.length > normalizedCurrent.length;
+}
+
+function shouldAllowTerminalProcessContentReplacement(incoming: Partial<ChatMessage>): boolean {
+  return hasOwnMessageField(incoming, 'processContent')
+    && hasOwnMessageField(incoming, 'processStreaming')
+    && incoming.processStreaming === false;
 }
 
 function mergeMessagePreservingContent(existing: ChatMessage, incoming: Partial<ChatMessage>): ChatMessage {
@@ -380,7 +393,11 @@ function mergeMessagePreservingContent(existing: ChatMessage, incoming: Partial<
   if (hasOwnMessageField(incoming, 'content') && !shouldPreferIncomingMessageContent(existing, incoming)) {
     next.content = existing.content;
   }
-  if (hasOwnMessageField(incoming, 'processContent') && !shouldPreferIncomingSupplementalContent(existing.processContent, incoming.processContent)) {
+  if (hasOwnMessageField(incoming, 'processContent') && !shouldPreferIncomingSupplementalContent(
+    existing.processContent,
+    incoming.processContent,
+    { allowShorterReplacement: shouldAllowTerminalProcessContentReplacement(incoming) },
+  )) {
     next.processContent = existing.processContent;
   }
   return next;
@@ -401,6 +418,7 @@ function mergeMessagePatchPreservingContent(
   if (hasOwnMessageField(incomingPatch, 'processContent') && !shouldPreferIncomingSupplementalContent(
     typeof existingPatch.processContent === 'string' ? existingPatch.processContent : '',
     incomingPatch.processContent,
+    { allowShorterReplacement: shouldAllowTerminalProcessContentReplacement(incomingPatch) },
   )) {
     next.processContent = existingPatch.processContent;
   }
@@ -527,6 +545,8 @@ function mapStreamingErrorUpdate(evt: any, fallbackContent: string): Partial<Cha
     messageCode: typeof evt.messageCode === 'string' ? evt.messageCode : undefined,
     messageParams: evt.messageParams && typeof evt.messageParams === 'object' ? evt.messageParams : undefined,
     rawDetail: typeof evt.rawDetail === 'string' && evt.rawDetail.trim() ? evt.rawDetail : undefined,
+    processContent: typeof evt.process_content === 'string' ? evt.process_content : undefined,
+    processStreaming: false,
   };
 }
 
@@ -2887,10 +2907,11 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
         const parentUserMsg = currentMessages.find(m => m.id === parentId);
         const contentStr = customParentContent || parentUserMsg?.content || 'Continue';
         const currentSession = sessions.find(s => s.id === activeKey);
+        const shouldShowProcessPlaceholder = !!(currentSession?.process_start_tag && currentSession?.process_end_tag);
         forceAutoScrollRef.current = true;
         setMessages(prev => [
           ...prev.filter(message => message.id !== msg.id),
-          { id: tempId, role: 'assistant', content: '', timestamp: new Date(), model: currentSession?.model || msg.model, agentName: currentSession?.name || msg.agentName, parentId },
+          { id: tempId, role: 'assistant', content: '', processStreaming: shouldShowProcessPlaceholder, timestamp: new Date(), model: currentSession?.model || msg.model, agentName: currentSession?.name || msg.agentName, parentId },
         ]);
         setActiveLeafId(tempId);
         const response = await fetch('/api/chat/regenerate', {
@@ -2934,7 +2955,23 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
                 if (evt.type === 'final') {
                   receivedFinal = true;
                 }
-                queueAssistantPatch({ content: evt.text }, evt.type === 'final');
+                const patch: Partial<ChatMessage> = {
+                  content: typeof evt.text === 'string' ? evt.text : '',
+                };
+                if (typeof evt.process_content === 'string') {
+                  patch.processContent = evt.process_content;
+                }
+                if (typeof evt.process_streaming === 'boolean') {
+                  patch.processStreaming = evt.process_streaming;
+                } else if (evt.type === 'final') {
+                  patch.processStreaming = false;
+                }
+                if (typeof evt.modelUsed === 'string') {
+                  patch.model = evt.modelUsed;
+                } else if (typeof evt.model_used === 'string') {
+                  patch.model = evt.model_used;
+                }
+                queueAssistantPatch(patch, evt.type === 'final');
               } else if (evt.type === 'error') {
                 receivedError = true;
                 dropAssistantPatches();
@@ -2948,6 +2985,9 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
           }
         }
         flushQueuedMessagePatches();
+        if (!receivedError) {
+          queueAssistantPatch({ processStreaming: false }, true);
+        }
         if (!receivedFinal && !receivedError && shouldAttemptMissingTerminalRecovery(lastStreamText)) {
           await recoverLatestChatMessages(true);
         }
@@ -3118,10 +3158,11 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
         const currentSession = sessions.find(s => s.id === activeKey);
         const snapshotModel = currentSession?.model || currentModel || undefined;
         const snapshotAgentName = currentSession?.name || activeSessionName || undefined;
+        const shouldShowProcessPlaceholder = !!(currentSession?.process_start_tag && currentSession?.process_end_tag);
         forceAutoScrollRef.current = true;
         setMessages(prev => [...prev,
           { id: userMessageId, role: 'user', content: fullMessage, timestamp: new Date(), parentId: parentForUser },
-          { id: assistantId, role: 'assistant', content: '', timestamp: new Date(), model: snapshotModel, agentName: snapshotAgentName, parentId: userMessageId },
+          { id: assistantId, role: 'assistant', content: '', processStreaming: shouldShowProcessPlaceholder, timestamp: new Date(), model: snapshotModel, agentName: snapshotAgentName, parentId: userMessageId },
         ]);
         setActiveLeafId(assistantId);
         const response = await fetch('/api/chat', {
@@ -3168,7 +3209,23 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
                 if (evt.type === 'final') {
                   receivedFinal = true;
                 }
-                queueAssistantPatch({ content: evt.text }, evt.type === 'final');
+                const patch: Partial<ChatMessage> = {
+                  content: typeof evt.text === 'string' ? evt.text : '',
+                };
+                if (typeof evt.process_content === 'string') {
+                  patch.processContent = evt.process_content;
+                }
+                if (typeof evt.process_streaming === 'boolean') {
+                  patch.processStreaming = evt.process_streaming;
+                } else if (evt.type === 'final') {
+                  patch.processStreaming = false;
+                }
+                if (typeof evt.modelUsed === 'string') {
+                  patch.model = evt.modelUsed;
+                } else if (typeof evt.model_used === 'string') {
+                  patch.model = evt.model_used;
+                }
+                queueAssistantPatch(patch, evt.type === 'final');
               } else if (evt.type === 'error') {
                 receivedError = true;
                 dropAssistantPatches();
@@ -3182,6 +3239,9 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
           }
         }
         flushQueuedMessagePatches();
+        if (!receivedError) {
+          queueAssistantPatch({ processStreaming: false }, true);
+        }
         if (!receivedFinal && !receivedError && shouldAttemptMissingTerminalRecovery(lastStreamText)) {
           await recoverLatestChatMessages(true);
         }
