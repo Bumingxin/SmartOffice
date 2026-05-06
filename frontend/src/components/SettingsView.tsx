@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, Fragment, type ChangeEvent } from 'react';
-import { Eye, EyeOff, Check, X, Loader2, Edit2, Trash2, Plus, Menu, Activity, Globe, Zap, Wrench, ArrowUpDown, Link2, ChevronDown } from 'lucide-react';
+import { Eye, EyeOff, Check, X, Loader2, Edit2, Trash2, Plus, Menu, Github, Send, ShoppingBag, Activity, Globe, Zap, Wrench, ArrowUpDown, Link2, ChevronDown, Image as ImageIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { SettingsTab } from '../App';
 import { applyLanguagePreference, normalizeLanguage, type SupportedLanguage } from '../i18n';
@@ -527,7 +527,8 @@ const isPersistedUpdateRestartModalStateFresh = (state: PersistedUpdateRestartMo
 
 const BROWSER_CHECK_PHASE_VISUALS: Record<string, BrowserTaskPhaseVisual> = {
   'read-config': { progress: 12, labelKey: 'settings.gateway.browserTaskPhases.readConfig' },
-  'read-status': { progress: 28, labelKey: 'settings.gateway.browserTaskPhases.readStatus' },
+  'wait-gateway': { progress: 22, labelKey: 'settings.gateway.browserTaskPhases.waitGateway' },
+  'read-status': { progress: 32, labelKey: 'settings.gateway.browserTaskPhases.readStatus' },
   'start-browser': { progress: 52, labelKey: 'settings.gateway.browserTaskPhases.startBrowser' },
   'wait-running': { progress: 68, labelKey: 'settings.gateway.browserTaskPhases.waitRunning' },
   'open-validation': { progress: 84, labelKey: 'settings.gateway.browserTaskPhases.openValidation' },
@@ -541,8 +542,10 @@ const BROWSER_REPAIR_PHASE_VISUALS: Record<string, BrowserTaskPhaseVisual> = {
   'read-status': { progress: 28, labelKey: 'settings.gateway.browserTaskPhases.readStatus' },
   'enable-permissions': { progress: 42, labelKey: 'settings.gateway.browserTaskPhases.enablePermissions' },
   'sync-browser-settings': { progress: 52, labelKey: 'settings.gateway.browserTaskPhases.syncBrowserSettings' },
-  'restart-gateway': { progress: 58, labelKey: 'settings.gateway.browserTaskPhases.restartGateway' },
-  'stop-browser': { progress: 70, labelKey: 'settings.gateway.browserTaskPhases.stopBrowser' },
+  'refresh-plugins': { progress: 56, labelKey: 'settings.gateway.browserTaskPhases.refreshPlugins' },
+  'restart-gateway': { progress: 60, labelKey: 'settings.gateway.browserTaskPhases.restartGateway' },
+  'wait-gateway': { progress: 66, labelKey: 'settings.gateway.browserTaskPhases.waitGateway' },
+  'stop-browser': { progress: 72, labelKey: 'settings.gateway.browserTaskPhases.stopBrowser' },
   'start-browser': { progress: 82, labelKey: 'settings.gateway.browserTaskPhases.startBrowser' },
   'wait-running': { progress: 90, labelKey: 'settings.gateway.browserTaskPhases.waitRunning' },
   'reset-profile': { progress: 96, labelKey: 'settings.gateway.browserTaskPhases.resetProfile' },
@@ -625,6 +628,8 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
   const [permissionsPasswordUser, setPermissionsPasswordUser] = useState('');
   const [permissionsPasswordError, setPermissionsPasswordError] = useState<InlineErrorState>(EMPTY_INLINE_ERROR);
   const [isSubmittingPermissionsPassword, setIsSubmittingPermissionsPassword] = useState(false);
+  const [maxPermissionsConfirmPendingEnabled, setMaxPermissionsConfirmPendingEnabled] = useState<boolean | null>(null);
+  const [restartAfterPermissionsPasswordSubmit, setRestartAfterPermissionsPasswordSubmit] = useState(false);
   const [allowedHosts, setAllowedHosts] = useState<string[]>([]);
   const [newHost, setNewHost] = useState('');
   const [editingHost, setEditingHost] = useState<string | null>(null);
@@ -679,7 +684,7 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
   // --- General settings state ---
   const [aiName, setAiName] = useState(() => t('settings.general.aiNamePlaceholder'));
   const [loginEnabled, setLoginEnabled] = useState(false);
-  const [loginPassword, setLoginPassword] = useState('admin123');
+  const [loginPassword, setLoginPassword] = useState('123456');
   const [showLoginPassword, setShowLoginPassword] = useState(false);
   const [generalSaved, setGeneralSaved] = useState(false);
   const [generalError, setGeneralError] = useState(false);
@@ -731,6 +736,11 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
   const [defaultModelId, setDefaultModelId] = useState('');
   const [defaultModelError, setDefaultModelError] = useState<InlineErrorState>(EMPTY_INLINE_ERROR);
   const [isSavingDefaultModel, setIsSavingDefaultModel] = useState(false);
+  const [imageGenerationModelId, setImageGenerationModelId] = useState('');
+  const [imageGenerationFallbacks, setImageGenerationFallbacks] = useState<string[]>([]);
+  const [imageGenerationFallbackMode, setImageGenerationFallbackMode] = useState<ModelFallbackMode>('disabled');
+  const [imageGenerationModelError, setImageGenerationModelError] = useState<InlineErrorState>(EMPTY_INLINE_ERROR);
+  const [isSavingImageGenerationModel, setIsSavingImageGenerationModel] = useState(false);
   const [globalFallbacks, setGlobalFallbacks] = useState<string[]>([]);
   const [globalFallbackMode, setGlobalFallbackMode] = useState<ModelFallbackMode>('disabled');
   const [globalFallbackError, setGlobalFallbackError] = useState<InlineErrorState>(EMPTY_INLINE_ERROR);
@@ -743,6 +753,21 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
   const [newModelAlias, setNewModelAlias] = useState('');
   const [newModelInput, setNewModelInput] = useState<string[]>(['text']);
   const [modelError, setModelError] = useState('');
+
+  const modelSupportsImageGeneration = (model: { input?: string[] }) => (
+    (model.input || []).some((capability) => {
+      const normalized = capability.toLowerCase().replace(/[-\s]+/g, '_');
+      return normalized === 'image_generation' || normalized === 'image_generate' || normalized === 'image_output';
+    })
+  );
+
+  const sortModelsByDisplayName = <T extends { id: string; alias?: string }>(items: T[]) => (
+    [...items].sort((a, b) => {
+      const labelA = a.alias || a.id;
+      const labelB = b.alias || b.id;
+      return labelA.localeCompare(labelB, undefined, { sensitivity: 'base' });
+    })
+  );
 
   const [editingModelId, setEditingModelId] = useState<string | null>(null);
   const [editingAlias, setEditingAlias] = useState('');
@@ -828,6 +853,7 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
 
     fetchCommands();
     fetchModels();
+    fetchImageGenerationModelConfig();
     fetchGlobalFallbacks();
     fetchEndpoints();
 
@@ -1722,6 +1748,28 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
     }
   };
 
+  const fetchImageGenerationModelConfig = async () => {
+    try {
+      const res = await fetch('/api/models/image-generation');
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.success) {
+        const primary = typeof data?.config?.primary === 'string' ? data.config.primary : '';
+        const fallbacks = Array.isArray(data?.config?.fallbacks) ? data.config.fallbacks : [];
+        setImageGenerationModelId(primary);
+        setImageGenerationFallbacks(fallbacks);
+        setImageGenerationFallbackMode(fallbacks.length > 0 ? 'custom' : 'disabled');
+        setImageGenerationModelError(EMPTY_INLINE_ERROR);
+      } else {
+        setImageGenerationModelError(resolveStructuredErrorDisplay(data, t, 'settings.models.imageGenerationLoadFailed'));
+      }
+    } catch (err) {
+      setImageGenerationModelError({
+        message: t('settings.models.imageGenerationLoadFailed'),
+        detail: err instanceof Error && err.message.trim() ? err.message.trim() : '',
+      });
+    }
+  };
+
   const fetchGlobalFallbacks = async () => {
     try {
       const res = await fetch('/api/models/fallbacks');
@@ -1812,6 +1860,45 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
     }
   };
 
+  const handleSaveImageGenerationModelConfig = async (primary: string, fallbacks: string[]) => {
+    const normalizedPrimary = primary.trim();
+    const normalizedFallbacks = Array.from(new Set(fallbacks.filter((id) => id && id !== normalizedPrimary)));
+    setImageGenerationModelError(EMPTY_INLINE_ERROR);
+    setIsSavingImageGenerationModel(true);
+
+    try {
+      const res = await fetch('/api/models/image-generation', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          primary: normalizedPrimary || null,
+          fallbacks: normalizedPrimary ? normalizedFallbacks : [],
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+
+      if (res.ok && data.success) {
+        const nextPrimary = typeof data?.config?.primary === 'string' ? data.config.primary : '';
+        const nextFallbacks = Array.isArray(data?.config?.fallbacks) ? data.config.fallbacks : [];
+        setImageGenerationModelId(nextPrimary);
+        setImageGenerationFallbacks(nextFallbacks);
+        setImageGenerationFallbackMode(nextFallbacks.length > 0 ? 'custom' : 'disabled');
+        return;
+      }
+
+      setImageGenerationModelError(resolveStructuredErrorDisplay(data, t, 'settings.models.imageGenerationSaveFailed'));
+      await fetchImageGenerationModelConfig();
+    } catch (err) {
+      setImageGenerationModelError({
+        message: t('settings.models.imageGenerationSaveFailed'),
+        detail: err instanceof Error && err.message.trim() ? err.message.trim() : '',
+      });
+      await fetchImageGenerationModelConfig();
+    } finally {
+      setIsSavingImageGenerationModel(false);
+    }
+  };
+
   useEffect(() => {
     if (suppressGlobalFallbackAutosaveRef.current) return;
     if (globalFallbackMode === 'custom' && globalFallbacks.length === 0) return;
@@ -1847,6 +1934,7 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
   // Capability definitions
   const CAPABILITIES = [
     { id: 'image',     label: t('settings.models.capability.image'), Icon: Eye,         color: 'text-violet-600 bg-violet-50 border-violet-200' },
+    { id: 'image_generation', label: t('settings.models.capability.imageGeneration'), Icon: ImageIcon, color: 'text-emerald-600 bg-emerald-50 border-emerald-200' },
     { id: 'reasoning', label: t('settings.models.capability.reasoning'), Icon: Zap,         color: 'text-amber-600 bg-amber-50 border-amber-200' },
     { id: 'tools',     label: t('settings.models.capability.tools'), Icon: Wrench,      color: 'text-pink-600 bg-pink-50 border-pink-200' },
     { id: 'web',       label: t('settings.models.capability.web'), Icon: Globe,       color: 'text-blue-600 bg-blue-50 border-blue-200' },
@@ -1858,6 +1946,7 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
     const id = modelId.toLowerCase();
     const caps = new Set<string>(['text']);
     if (/vision|4v|claude-3|claude-opus|claude-sonnet|claude-haiku|gpt-4o|gpt-4-turbo|gemini|llava|qwen.*vl|intern.*vl|glm-4v|minicpm.*v|cogvlm|pixtral|phi.*vision|qvq|kimi.*vl|chatglm.*vl|(^|\/)gpt-5\.4$/.test(id)) caps.add('image');
+    if (/gpt[-_.]?image|dall[-_.]?e|imagen|flux|sdxl|stable[-_.]?diffusion|seedream|jimeng|image[-_.]?01|grok[-_.]?imagine|gemini.*image|image[-_.]?preview|comfy.*workflow|workflow.*comfy/.test(id)) caps.add('image_generation');
     if (/o1|o3|o4|thinking|reasoning|deepthink|r1|r2/.test(id)) caps.add('reasoning');
     if (/embed|embedding|text-embedding|bge|e5-/.test(id)) caps.add('embed');
     if (/rerank|reranker|bce-reranker/.test(id)) caps.add('rerank');
@@ -1925,9 +2014,10 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
 
   const handleTestSingleModel = async (modelId: string, e?: React.MouseEvent, signal?: AbortSignal) => {
     if (e) e.stopPropagation();
+    const shouldUseImageGenerationTest = guessCapabilities(modelId).includes('image_generation');
     setIndividualTestStatus(prev => ({...prev, [modelId]: { status: 'testing', message: '' }}));
     try {
-      const res = await fetch('/api/models/test', {
+      const res = await fetch(shouldUseImageGenerationTest ? '/api/models/test-image-generation' : '/api/models/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ endpoint: newModelEndpoint.trim(), modelName: modelId }),
@@ -1935,13 +2025,17 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
       });
       const data = await res.json().catch(() => ({}));
       if (data.success) {
-        setIndividualTestStatus(prev => ({...prev, [modelId]: { status: 'success', message: 'OK' }}));
+        setIndividualTestStatus(prev => ({
+          ...prev,
+          [modelId]: {
+            status: 'success',
+            message: shouldUseImageGenerationTest ? t('settings.models.imageGenerationLightCheckGood') : 'OK',
+            detail: typeof data.warning === 'string' && data.warning.trim() ? data.warning.trim() : undefined,
+          },
+        }));
       } else {
-        const display = resolveStructuredErrorDisplay(data, t, 'settings.models.connectivityFailed');
+        const display = resolveStructuredErrorDisplay(data, t, shouldUseImageGenerationTest ? 'settings.models.imageGenerationLightCheckFailed' : 'settings.models.connectivityFailed');
         setIndividualTestStatus(prev => ({...prev, [modelId]: { status: 'error', message: display.message, detail: display.detail || undefined }}));
-        if (!signal && display.detail) {
-          openSettingsErrorModal(display.message, display.detail);
-        }
       }
     } catch (err: any) {
       if (err.name === 'AbortError') {
@@ -1955,17 +2049,15 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
         const detail = typeof err?.message === 'string' && err.message.trim() ? err.message.trim() : '';
         const message = t('settings.models.testNetworkError');
         setIndividualTestStatus(prev => ({...prev, [modelId]: { status: 'error', message, detail: detail || undefined }}));
-        if (!signal && detail) {
-          openSettingsErrorModal(message, detail);
-        }
       }
     }
   };
 
   const handleTestExistingSingleModel = async (fullModelId: string, endpoint: string, modelName: string) => {
+    const shouldUseImageGenerationTest = modelSupportsImageGeneration(models.find((model) => model.id === fullModelId) || {});
     setExistingModelTestStatus(prev => ({ ...prev, [fullModelId]: { status: 'testing' } }));
     try {
-      const res = await fetch('/api/models/test', {
+      const res = await fetch(shouldUseImageGenerationTest ? '/api/models/test-image-generation' : '/api/models/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ endpoint, modelName })
@@ -1973,21 +2065,22 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
       const data = await res.json().catch(() => ({}));
 
       if (res.ok && data.success) {
-        setExistingModelTestStatus(prev => ({ ...prev, [fullModelId]: { status: 'success' } }));
+        setExistingModelTestStatus(prev => ({
+          ...prev,
+          [fullModelId]: {
+            status: 'success',
+            message: shouldUseImageGenerationTest ? t('settings.models.imageGenerationLightCheckGood') : undefined,
+            detail: typeof data.warning === 'string' && data.warning.trim() ? data.warning.trim() : undefined,
+          },
+        }));
       } else {
-        const display = resolveStructuredErrorDisplay(data, t, 'settings.models.connectivityFailed');
+        const display = resolveStructuredErrorDisplay(data, t, shouldUseImageGenerationTest ? 'settings.models.imageGenerationLightCheckFailed' : 'settings.models.connectivityFailed');
         setExistingModelTestStatus(prev => ({ ...prev, [fullModelId]: { status: 'error', message: display.message, detail: display.detail || undefined } }));
-        if (display.detail) {
-          openSettingsErrorModal(display.message, display.detail);
-        }
       }
     } catch (err: any) {
       const detail = typeof err?.message === 'string' && err.message.trim() ? err.message.trim() : '';
       const message = t('settings.models.testNetworkError');
       setExistingModelTestStatus(prev => ({ ...prev, [fullModelId]: { status: 'error', message, detail: detail || undefined } }));
-      if (detail) {
-        openSettingsErrorModal(message, detail);
-      }
     }
   };
 
@@ -2092,13 +2185,23 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
     return true;
   };
 
-  const handleRestartGateway = () => {
-    if (!testResult?.success || isRestarting || gatewayRestartModalStage) {
-      return;
+  const openGatewayRestartConfirm = () => {
+    if (
+      isRestarting
+      || gatewayRestartModalStage
+      || browserHeadedModeModalStage === 'restarting'
+      || updateRestartModalStage === 'restarting'
+    ) {
+      return false;
     }
     setRestartSuccess(false);
     setGatewayRestartModalDetail('');
     setGatewayRestartModalStage('confirm');
+    return true;
+  };
+
+  const handleRestartGateway = () => {
+    openGatewayRestartConfirm();
   };
 
   const applyGatewayRestartTaskState = (data: { restart?: unknown }) => {
@@ -2352,6 +2455,12 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
     setPermissionsPasswordUser('');
     setPermissionsPassword('');
     setPermissionsPasswordError(EMPTY_INLINE_ERROR);
+    setRestartAfterPermissionsPasswordSubmit(false);
+  };
+
+  const closeMaxPermissionsConfirmModal = () => {
+    if (isTogglingPermissions) return;
+    setMaxPermissionsConfirmPendingEnabled(null);
   };
 
   const requestMaxPermissionsChange = async (nextEnabled: boolean, systemPassword?: string) => {
@@ -2367,8 +2476,10 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
     return { res, data };
   };
 
-  const handleToggleMaxPermissions = async () => {
-    const nextEnabled = !maxPermissions;
+  const applyMaxPermissionsChange = async (
+    nextEnabled: boolean,
+    options?: { restartAfterSuccess?: boolean },
+  ) => {
     setMaxPermissions(nextEnabled);
     setIsTogglingPermissions(true);
     setPermissionsError(EMPTY_INLINE_ERROR);
@@ -2383,7 +2494,15 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
         setPermissionsError(EMPTY_INLINE_ERROR);
         setBrowserHealth(null);
         setGatewayRestartNoticeSource('permissions');
+        if (data.restartRequired) {
+          if (options?.restartAfterSuccess) {
+            void handleConfirmRestartGateway();
+          } else {
+            openGatewayRestartConfirm();
+          }
+        }
       } else if (nextEnabled && responseNeedsHostTakeoverPasswordPrompt(data)) {
+        setRestartAfterPermissionsPasswordSubmit(!!options?.restartAfterSuccess);
         if (typeof data.enabled === 'boolean' || data.hostTakeover) {
           applyMaxPermissionsState(data);
         } else {
@@ -2421,6 +2540,23 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
     }
   };
 
+  const handleToggleMaxPermissions = () => {
+    const nextEnabled = !maxPermissions;
+    setPermissionsError(EMPTY_INLINE_ERROR);
+    setPermissionsNotice(null);
+    setBrowserHealthNotice(null);
+    setGatewayRestartNoticeSource(null);
+    setBrowserHealthError(EMPTY_INLINE_ERROR);
+    setMaxPermissionsConfirmPendingEnabled(nextEnabled);
+  };
+
+  const handleConfirmMaxPermissionsToggle = async () => {
+    if (maxPermissionsConfirmPendingEnabled === null) return;
+    const nextEnabled = maxPermissionsConfirmPendingEnabled;
+    setMaxPermissionsConfirmPendingEnabled(null);
+    await applyMaxPermissionsChange(nextEnabled, { restartAfterSuccess: true });
+  };
+
   const handleSubmitPermissionsPassword = async () => {
     if (!permissionsPassword.trim()) {
       setPermissionsPasswordError({
@@ -2445,6 +2581,14 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
         setPermissionsPasswordError(EMPTY_INLINE_ERROR);
         setBrowserHealth(null);
         setGatewayRestartNoticeSource('permissions');
+        if (data.restartRequired) {
+          if (restartAfterPermissionsPasswordSubmit) {
+            setRestartAfterPermissionsPasswordSubmit(false);
+            void handleConfirmRestartGateway();
+          } else {
+            openGatewayRestartConfirm();
+          }
+        }
         return;
       }
 
@@ -2635,7 +2779,19 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok && data.success) {
-        setBrowserHealth(null);
+        const snapshot = data.health as BrowserHealthSnapshot | undefined;
+        if (snapshot) {
+          applyBrowserHealthSnapshot(snapshot);
+          if (!snapshot.healthy) {
+            setBrowserHealthError({
+              message: t('gateway.browserHealthFailed'),
+              detail: snapshot.validationDetail || snapshot.rawDetail || snapshot.detectError || '',
+            });
+            return;
+          }
+        } else {
+          setBrowserHealth(null);
+        }
         setBrowserHealthNotice({
           tone: 'success',
           message: t('settings.gateway.browserSelfHealSuccess'),
@@ -2899,6 +3055,7 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
         if (res.ok) {
           setModelActionError(EMPTY_INLINE_ERROR);
           fetchModels();
+          fetchImageGenerationModelConfig();
           fetchGlobalFallbacks();
   
         } else {
@@ -2914,6 +3071,7 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
         if (res.ok) {
           setModelActionError(EMPTY_INLINE_ERROR);
           fetchModels();
+          fetchImageGenerationModelConfig();
           fetchGlobalFallbacks();
           fetchEndpoints();
   
@@ -2956,9 +3114,10 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
       return false;
     }
     setAddModelTestStatus('testing');
-    setAddModelTestMessage(t('settings.models.testingConnectivity'));
+    const shouldUseImageGenerationTest = modelSupportsImageGeneration({ input: newModelInput });
+    setAddModelTestMessage(shouldUseImageGenerationTest ? t('settings.models.imageGenerationLightChecking') : t('settings.models.testingConnectivity'));
     try {
-      const res = await fetch('/api/models/test', {
+      const res = await fetch(shouldUseImageGenerationTest ? '/api/models/test-image-generation' : '/api/models/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -2971,16 +3130,16 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
       if (res.ok && data.success) {
         setAddModelTestStatus('success');
         const latency = data.latency !== undefined ? `${data.latency}ms` : t('settings.models.unknownLatency');
-        setAddModelTestMessage(t('settings.models.connectivityGood', { latency }));
+        setAddModelTestMessage(shouldUseImageGenerationTest
+          ? t('settings.models.imageGenerationLightCheckGoodWithLatency', { latency })
+          : t('settings.models.connectivityGood', { latency }));
+        setTestModelMessage(typeof data.warning === 'string' && data.warning.trim() ? data.warning.trim() : '');
         return true;
       } else {
-        const display = resolveStructuredErrorDisplay(data, t, 'settings.models.connectivityFailed');
+        const display = resolveStructuredErrorDisplay(data, t, shouldUseImageGenerationTest ? 'settings.models.imageGenerationLightCheckFailed' : 'settings.models.connectivityFailed');
         setAddModelTestStatus('error');
         setAddModelTestMessage(display.message);
         setTestModelMessage(display.detail || display.message);
-        if (display.detail) {
-          openSettingsErrorModal(display.message, display.detail);
-        }
         return false;
       }
     } catch (err: any) {
@@ -2989,9 +3148,6 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
       setAddModelTestStatus('error');
       setAddModelTestMessage(message);
       setTestModelMessage(detail || message);
-      if (detail) {
-        openSettingsErrorModal(message, detail);
-      }
       return false;
     }
   };
@@ -3135,6 +3291,7 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
         setEditingAlias('');
         setEditingInput([]);
         fetchModels();
+        fetchImageGenerationModelConfig();
 
       } else {
         const data = await res.json().catch(() => ({}));
@@ -3250,6 +3407,10 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
     ...models.map(m => m.id.split('/')[0]).filter(Boolean)
   ])).sort((a, b) => a.localeCompare(b));
   const currentPrimaryModelId = models.find((model) => model.primary)?.id || '';
+  const sortedModels = sortModelsByDisplayName(models);
+  const imageGenerationModels = sortModelsByDisplayName(models.filter(modelSupportsImageGeneration));
+  const hasImageGenerationModels = imageGenerationModels.length > 0;
+  const newModelUsesImageGeneration = modelSupportsImageGeneration({ input: newModelInput });
 
   const currentLanguage = normalizeLanguage(i18n.resolvedLanguage || i18n.language);
   const openClawCurrentVersion = detectedOpenClawVersion
@@ -3728,6 +3889,11 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
         : gatewayRestartModalStage === 'failure'
           ? t('settings.gateway.restartGatewayRestartFailedMessage')
           : '';
+  const canRestartGateway = !isRestarting
+    && gatewayRestartModalStage === null
+    && browserHeadedModeModalStage !== 'restarting'
+    && updateRestartModalStage !== 'restarting';
+  const canSaveGateway = !isLoading && !!url.trim();
   const updateRestartModalTitle = updateRestartModalStage === 'confirm'
     ? t('settings.about.restartServiceConfirmTitle')
     : updateRestartModalStage === 'restarting'
@@ -4490,8 +4656,8 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
                 <div className="flex gap-2 sm:gap-3 items-center">
                   <button
                     onClick={handleRestartGateway}
-                    disabled={!testResult?.success || isRestarting || gatewayRestartModalStage !== null || browserHeadedModeModalStage === 'restarting' || updateRestartModalStage === 'restarting'}
-                    className={`inline-flex items-center gap-2 px-4 sm:px-5 py-2.5 text-sm font-medium rounded-xl transition-all ${ testResult?.success ? 'text-orange-600 bg-orange-50 hover:bg-orange-100 border border-orange-200' : 'text-gray-400 bg-gray-100 border border-gray-200 cursor-not-allowed' }`}
+                    disabled={!canRestartGateway}
+                    className={`inline-flex items-center gap-2 px-4 sm:px-5 py-2.5 text-sm font-medium rounded-xl transition-all ${ canRestartGateway ? 'text-orange-600 bg-orange-50 hover:bg-orange-100 border border-orange-200' : 'text-gray-400 bg-gray-100 border border-gray-200 cursor-not-allowed' }`}
                   >
                     {isRestarting ? <Loader2 className="w-4 h-4 animate-spin sm:block hidden" /> : <Loader2 className="w-4 h-4 sm:block hidden" />}
                     {restartSuccess ? t('settings.gateway.restarted') : <><span className="sm:hidden">{t('common.restart')}</span><span className="hidden sm:inline">{t('settings.gateway.restartGateway')}</span></>}
@@ -4505,8 +4671,8 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
                   )}
                   <button
                     onClick={handleSave}
-                    disabled={isLoading || !testResult?.success}
-                    className={`inline-flex items-center gap-2 px-5 sm:px-8 py-2.5 text-sm font-medium rounded-xl text-white transition-all ${ isLoading || !testResult?.success ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700' }`}
+                    disabled={!canSaveGateway}
+                    className={`inline-flex items-center gap-2 px-5 sm:px-8 py-2.5 text-sm font-medium rounded-xl text-white transition-all ${ !canSaveGateway ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700' }`}
                   >
                     {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : gatewaySaved ? <><Check className="w-4 h-4" /> {t('settings.gateway.saved')}</> : <><span className="sm:hidden">{t('common.save')}</span><span className="hidden sm:inline">{t('settings.gateway.save')}</span></>}
                   </button>
@@ -5039,7 +5205,7 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
                                                 }}
                                                 disabled={existingModelTestStatus[model.id]?.status === 'testing'}
                                                 className={`p-1.5 rounded-lg transition-colors ${ existingModelTestStatus[model.id]?.status === 'testing' ? 'text-gray-300 cursor-not-allowed' : 'text-gray-400 hover:text-purple-600 hover:bg-purple-50' }`}
-                                                title={t('settings.models.testAvailability')}
+                                                title={modelSupportsImageGeneration(model) ? t('settings.models.testImageGenerationLight') : t('settings.models.testAvailability')}
                                               >
                                                 <Activity className="w-4 h-4" />
                                               </button>
@@ -5136,11 +5302,7 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
 
                 <div className="min-w-0 rounded-2xl border border-gray-200 bg-white p-4 sm:p-6">
                   <ModelSinglePicker
-                    availableModels={[...models].sort((a, b) => {
-                      const labelA = a.alias || a.id;
-                      const labelB = b.alias || b.id;
-                      return labelA.localeCompare(labelB, undefined, { sensitivity: 'base' });
-                    })}
+                    availableModels={sortedModels}
                     selectedModelId={defaultModelId}
                     onSelectedModelIdChange={(id) => {
                       void handleSaveDefaultModelSelection(id);
@@ -5150,6 +5312,7 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
                     allModelsTabLabel={t('sidebar.allModels')}
                     defaultBadgeLabel={t('settings.models.defaultTag')}
                     visionBadgeLabel={t('sidebar.visionModel')}
+                    imageGenerationBadgeLabel={t('settings.models.imageGenerationBadge')}
                     disabled={isSavingDefaultModel || models.length === 0}
                   />
                 </div>
@@ -5224,10 +5387,141 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
                     defaultBadgeLabel={t('settings.models.defaultTag')}
                     allModelsTabLabel={t('sidebar.allModels')}
                     visionBadgeLabel={t('sidebar.visionModel')}
+                    imageGenerationBadgeLabel={t('settings.models.imageGenerationBadge')}
                     selectionUiVariant="model-picker"
                     className="min-w-0"
                   />
                 ) : null}
+              </div>
+
+              <div className="space-y-4 pt-2">
+                <div className="space-y-1">
+                  <h3 className="text-lg font-semibold text-gray-900">
+                    {t('settings.models.imageGenerationTitle')}
+                  </h3>
+                  <p className="text-sm text-gray-500 leading-relaxed">
+                    {t('settings.models.imageGenerationDescription')}
+                  </p>
+                </div>
+
+                {imageGenerationModelError.message ? (
+                  <div className="rounded-xl border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-600">
+                    <div>{imageGenerationModelError.message}</div>
+                    {imageGenerationModelError.detail ? (
+                      <div className="mt-2 rounded-lg border border-red-100 bg-white/80 px-3 py-2 text-xs text-red-500 whitespace-pre-wrap break-all font-mono">
+                        {imageGenerationModelError.detail}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                <div className="min-w-0 space-y-4 rounded-2xl border border-gray-200 bg-white p-4 sm:p-6">
+                  <ModelSinglePicker
+                    availableModels={imageGenerationModels}
+                    selectedModelId={imageGenerationModelId}
+                    onSelectedModelIdChange={(id) => {
+                      const nextFallbacks = imageGenerationFallbacks.filter((fallbackId) => fallbackId !== id);
+                      setImageGenerationModelId(id);
+                      setImageGenerationFallbacks(nextFallbacks);
+                      if (nextFallbacks.length === 0) {
+                        setImageGenerationFallbackMode('disabled');
+                      }
+                      void handleSaveImageGenerationModelConfig(id, nextFallbacks);
+                    }}
+                    placeholder={t('settings.models.imageGenerationPlaceholder')}
+                    emptyText={t('settings.models.imageGenerationEmpty')}
+                    allModelsTabLabel={t('sidebar.allModels')}
+                    defaultBadgeLabel={t('settings.models.defaultTag')}
+                    visionBadgeLabel={t('sidebar.visionModel')}
+                    imageGenerationBadgeLabel={t('settings.models.imageGenerationBadge')}
+                    disabled={isSavingImageGenerationModel || !hasImageGenerationModels}
+                  />
+
+                  {!imageGenerationModelId ? (
+                    <div className="rounded-xl border border-gray-100 bg-gray-50 px-4 py-3 text-sm text-gray-500">
+                      {hasImageGenerationModels
+                        ? t('settings.models.imageGenerationOpenClawDefaultHint')
+                        : t('settings.models.imageGenerationNoSupportedHint')}
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+
+              <div className="space-y-4 pt-2">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <h3 className="text-lg font-semibold text-gray-900 mb-1">
+                      {t('settings.models.imageGenerationFallbackTitle')}
+                    </h3>
+                    <p className="text-sm text-gray-500 leading-relaxed">
+                      {t('settings.models.imageGenerationFallbackDescription')}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={Boolean(imageGenerationModelId) && imageGenerationFallbackMode !== 'disabled'}
+                    aria-label={t('settings.models.imageGenerationFallbackTitle')}
+                    disabled={!imageGenerationModelId || isSavingImageGenerationModel}
+                    onClick={() => {
+                      if (!imageGenerationModelId) return;
+                      if (imageGenerationFallbackMode === 'disabled') {
+                        setImageGenerationFallbackMode('custom');
+                        return;
+                      }
+                      setImageGenerationFallbackMode('disabled');
+                      setImageGenerationFallbacks([]);
+                      void handleSaveImageGenerationModelConfig(imageGenerationModelId, []);
+                    }}
+                    className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-blue-500/20 disabled:cursor-not-allowed disabled:opacity-60 ${imageGenerationModelId && imageGenerationFallbackMode !== 'disabled' ? 'bg-blue-600' : 'bg-gray-200'}`}
+                  >
+                    <span
+                      className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform duration-200 ease-in-out ${imageGenerationModelId && imageGenerationFallbackMode !== 'disabled' ? 'translate-x-6' : 'translate-x-1'}`}
+                    />
+                  </button>
+                </div>
+
+                {imageGenerationModelId ? (
+                  imageGenerationFallbackMode !== 'disabled' ? (
+                    <ModelFallbackEditor
+                      availableModels={imageGenerationModels}
+                      mode={imageGenerationFallbackMode}
+                      onModeChange={(mode) => setImageGenerationFallbackMode(mode)}
+                      selectedModelIds={imageGenerationFallbacks}
+                      onSelectedModelIdsChange={(ids) => {
+                        const nextIds = ids.filter((id) => id !== imageGenerationModelId);
+                        setImageGenerationFallbacks(nextIds);
+                        setImageGenerationFallbackMode(nextIds.length > 0 ? 'custom' : 'disabled');
+                        void handleSaveImageGenerationModelConfig(imageGenerationModelId, nextIds);
+                      }}
+                      excludedModelIds={[imageGenerationModelId]}
+                      title=""
+                      description=""
+                      customLabel={t('settings.models.fallbackModeCustom')}
+                      customHint=""
+                      disabledLabel={t('settings.models.fallbackModeDisabled')}
+                      disabledHint=""
+                      hideModeSelector
+                      searchPlaceholder={t('settings.models.imageGenerationFallbackSearchPlaceholder')}
+                      selectedTitle={t('settings.models.fallbackSelectedTitle')}
+                      availableTitle={t('settings.models.fallbackAvailableTitle')}
+                      emptySelectedText={t('settings.models.fallbackSelectedEmpty')}
+                      emptyAvailableText={t('settings.models.fallbackAvailableEmpty')}
+                      defaultBadgeLabel={t('settings.models.defaultTag')}
+                      allModelsTabLabel={t('sidebar.allModels')}
+                      visionBadgeLabel={t('sidebar.visionModel')}
+                      imageGenerationBadgeLabel={t('settings.models.imageGenerationBadge')}
+                      selectionUiVariant="model-picker"
+                      className="min-w-0"
+                    />
+                  ) : null
+                ) : (
+                  <div className="rounded-xl border border-gray-100 bg-gray-50 px-4 py-3 text-sm text-gray-500">
+                    {hasImageGenerationModels
+                      ? t('settings.models.imageGenerationFallbackNeedsPrimary')
+                      : t('settings.models.imageGenerationNoSupportedHint')}
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -5264,9 +5558,9 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
                   {/* Header */}
                   <div className="flex w-full flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
                     <div className="w-full text-left sm:w-auto">
-                      <div className="text-2xl font-black text-gray-900 tracking-tighter leading-tight mb-1">MingYuan</div>
+                      <div className="text-2xl font-black text-gray-900 tracking-tighter leading-tight mb-1">OpenClaw</div>
                       <div className="flex items-baseline gap-2 whitespace-nowrap leading-none">
-                        <div className="text-[1.15rem] font-bold text-gray-400 tracking-widest uppercase leading-tight">SmartOffice</div>
+                        <div className="text-[1.15rem] font-bold text-gray-400 tracking-widest uppercase leading-tight">CHAT GATEWAY</div>
                         <div className="text-[0.8rem] font-medium text-gray-400 leading-none">
                           {isLoadingAppVersion
                             ? t('settings.about.loadingVersion')
@@ -5299,6 +5593,58 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
                   <div className="w-full text-center text-xl font-medium leading-8 text-gray-700">
                     {t('settings.about.authorName')}
                   </div>
+
+                  {/* Links Row */}
+                  <div className="flex flex-wrap items-center justify-center gap-x-6 gap-y-4">
+                    <a 
+                      href="https://github.com/liandu2024/OpenClaw-Chat-Gateway" 
+                      target="_blank" 
+                      rel="noreferrer"
+                      className="flex items-center gap-2 text-[#3b82f6] hover:text-blue-700 transition-colors group text-[13px] sm:text-[15px] font-medium"
+                    >
+                      <Github className="w-5 h-5 text-gray-900 group-hover:-translate-y-0.5 transition-transform" />
+                      <span>Github</span>
+                    </a>
+                  <a 
+                    href="https://t.me/angeworld2024" 
+                    target="_blank" 
+                    rel="noreferrer"
+                    className="flex items-center gap-2 text-[#3b82f6] hover:text-blue-700 transition-colors group text-[13px] sm:text-[15px] font-medium"
+                  >
+                    <Send className="w-5 h-5 text-[#3b82f6] group-hover:-translate-y-0.5 transition-transform" />
+                    <span>{t('settings.about.tgGroup')}</span>
+                  </a>
+                  <a 
+                    href="https://blog.angeworld.cc/market" 
+                    target="_blank" 
+                    rel="noreferrer"
+                    className="flex items-center gap-2 text-[#3b82f6] hover:text-blue-700 transition-colors group text-[13px] sm:text-[15px] font-medium"
+                  >
+                    <ShoppingBag className="w-5 h-5 text-[#ef4444] group-hover:-translate-y-0.5 transition-transform" />
+                    <span>{t('settings.about.market')}</span>
+                  </a>
+                </div>
+
+                {/* API Button Row */}
+                <div className="w-full flex flex-col items-center gap-3 px-2">
+                  <a 
+                    href="https://ai.opendoor.cn" 
+                    target="_blank" 
+                    rel="noreferrer"
+                    className="flex items-center justify-center px-6 py-2.5 rounded-xl sm:rounded-full bg-[#fefce8] border border-blue-300 text-[#3b82f6] hover:bg-yellow-100 hover:border-blue-400 transition-all font-bold text-[11px] min-[380px]:text-[12px] sm:text-[14px] max-w-full text-center"
+                  >
+                    {t('settings.about.openDoorApiLabel')}
+                  </a>
+                  <a 
+                    href="https://ai.superdoor.top/register?promo=ANGEWORLD" 
+                    target="_blank" 
+                    rel="noreferrer"
+                    className="flex items-center justify-center px-6 py-2.5 rounded-xl sm:rounded-full bg-[#fefce8] border border-blue-300 text-[#3b82f6] hover:bg-yellow-100 hover:border-blue-400 transition-all font-bold text-[11px] min-[380px]:text-[12px] sm:text-[14px] max-w-full text-center"
+                  >
+                    {t('settings.about.superDoorApiLabel')}
+                  </a>
+                </div>
+
                   </div>
               </div>
             </div>
@@ -5306,6 +5652,53 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
 
         </div>
       </div>
+
+      {maxPermissionsConfirmPendingEnabled !== null && (
+        <div className="fixed inset-0 z-[230] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm transition-opacity" />
+          <div className="relative z-10 w-full max-w-sm overflow-y-auto rounded-2xl border border-gray-200 bg-white max-h-[calc(100vh-2rem)] animate-in fade-in zoom-in-95 duration-200">
+            <div className="p-6 text-center">
+              <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-amber-100">
+                {isTogglingPermissions
+                  ? <Loader2 className="h-6 w-6 animate-spin text-amber-600" />
+                  : <Zap className="h-6 w-6 text-amber-600" />}
+              </div>
+              <h3 className="mb-2 text-lg font-bold text-gray-900">
+                {t(maxPermissionsConfirmPendingEnabled
+                  ? 'settings.gateway.maxPermissionsRestartConfirmTitle'
+                  : 'settings.gateway.maxPermissionsDisableRestartConfirmTitle')}
+              </h3>
+              <p className="text-sm text-gray-500 whitespace-pre-wrap">
+                {t(maxPermissionsConfirmPendingEnabled
+                  ? 'settings.gateway.maxPermissionsRestartConfirmMessage'
+                  : 'settings.gateway.maxPermissionsDisableRestartConfirmMessage')}
+              </p>
+            </div>
+            <div className="flex gap-3 border-t border-gray-100 bg-gray-50 p-4">
+              <button
+                type="button"
+                onClick={closeMaxPermissionsConfirmModal}
+                disabled={isTogglingPermissions}
+                className="flex-1 rounded-xl border border-gray-200 bg-white px-4 py-2.5 font-semibold text-gray-700 transition-all hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {t('common.cancel')}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleConfirmMaxPermissionsToggle()}
+                disabled={isTogglingPermissions}
+                className="flex-1 rounded-xl bg-blue-600 px-4 py-2.5 font-semibold text-white transition-all hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isTogglingPermissions
+                  ? t('settings.gateway.hostTakeoverPasswordSubmitting')
+                  : t(maxPermissionsConfirmPendingEnabled
+                    ? 'settings.gateway.maxPermissionsRestartConfirmAction'
+                    : 'settings.gateway.maxPermissionsDisableRestartConfirmAction')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {permissionsPasswordModalOpen && (
         <div className="fixed inset-0 z-[230] flex items-center justify-center p-4">
@@ -6312,7 +6705,7 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
                 onClick={handleTestModel}
                 disabled={addModelTestStatus === 'testing' || !newModelEndpoint.trim() || !newModelName.trim()}
                 className={`flex-[1.5] px-3 py-2.5 rounded-xl font-semibold transition-all flex items-center justify-center gap-1.5 disabled:opacity-50 text-sm overflow-hidden ${ addModelTestStatus === 'testing' ? 'bg-blue-50 text-blue-600 border border-blue-200' : addModelTestStatus === 'success' ? 'bg-green-50 text-green-600 border border-green-200' : addModelTestStatus === 'error' ? 'bg-red-50 text-red-600 border border-red-200' : 'bg-indigo-50 text-indigo-700 border border-indigo-200 hover:text-indigo-800 hover:bg-indigo-100' }`}
-                title={addModelTestStatus !== 'idle' ? addModelTestMessage : t('settings.models.testThisModel')}
+                title={addModelTestStatus !== 'idle' ? addModelTestMessage : (newModelUsesImageGeneration ? t('settings.models.testImageGenerationLight') : t('settings.models.testThisModel'))}
               >
                 {addModelTestStatus === 'testing' ? <Loader2 className="w-4 h-4 animate-spin shrink-0" /> :
                  addModelTestStatus === 'success' ? <Check className="w-4 h-4 shrink-0" /> :
