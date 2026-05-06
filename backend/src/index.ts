@@ -1,4 +1,4 @@
-import express from 'express';
+import express, { type Response as ExpressResponse } from 'express';
 import axios from 'axios';
 import cors from 'cors';
 import path from 'path';
@@ -12,8 +12,18 @@ import OpenClawClient, { extractOpenClawMessageText } from './openclaw-client';
 import SessionManager from './session-manager';
 import ConfigManager from './config-manager';
 import DB from './db';
-import AgentProvisioner from './agent-provisioner';
-import { GroupChatEngine, createAgentResponseFailedMessage, getStructuredGroupMessage } from './group-chat-engine';
+import AgentProvisioner, { type ImageGenerationEndpointModelSnapshot } from './agent-provisioner';
+import {
+  GroupChatEngine,
+  appendToolProgressLine,
+  createAgentResponseFailedMessage,
+  formatToolResultProgress,
+  formatToolStartProgress,
+  getStructuredGroupMessage,
+  normalizeGroupToolProgressLocale,
+  normalizeToolArgsRecord,
+  type GroupToolProgressState,
+} from './group-chat-engine';
 import {
   deleteGroupWorkspace,
   ensureGroupWorkspace,
@@ -47,18 +57,31 @@ import {
   ensureManagedDocumentToolingReady,
   hasDocumentUploads,
 } from './document-tooling';
-import type { ChatRow, MessagePageInfo, MessageSearchMatch, StoredFileRow } from './db';
+import type {
+  AgentRuntimeMode,
+  AgentSystemPromptMode,
+  AgentToolMode,
+  CapabilityCacheRow,
+  ChatRow,
+  MessagePageInfo,
+  MessageSearchMatch,
+  SessionRow,
+  StoredFileRow,
+} from './db';
 import {
   type ChatHistorySnapshot,
   extractLatestAssistantOutcomeRecord,
   extractSettledAssistantOutcome,
   getHistoryTailActivity,
   getHistorySnapshot,
+  getUnknownHistorySnapshot,
   isNonTerminalAssistantMessage,
   shouldPreferSettledAssistantText,
 } from './chat-history-reconciliation';
 import { selectPreferredTextSnapshot } from './text-snapshot-protection';
 import { getCurrentAppVersionInfo, getLatestVersionInfo, type LatestVersionInfo as AppLatestVersionInfo } from './app-version';
+import { shouldUseConfiguredImageGenerationModel } from './image-generation-routing';
+import { readAgentBootstrapContextFromWorkspace } from './agent-bootstrap-context';
 
 const execPromise = util.promisify(exec);
 const execFilePromise = util.promisify(execFile);
@@ -257,6 +280,8 @@ const CHAT_HISTORY_COMPLETION_SETTLE_POLL_MS = 500;
 const CHAT_FINAL_EVENT_SETTLE_GRACE_MS = 1500;
 const CHAT_EMPTY_COMPLETION_RETRY_WINDOW_MS = 5 * 60 * 1000;
 const CHAT_HISTORY_ACTIVITY_GRACE_MS = 2 * 60 * 1000;
+const CHAT_ORPHAN_ABORT_TIMEOUT_MS = 5000;
+const CHAT_ABORT_RETRY_DELAYS_MS = [5000, 15000, 30000, 60000];
 const GROUP_SSE_KEEPALIVE_MS = 15000;
 const BROWSER_HEALTH_CLI_TIMEOUT_MS = 15000;
 const BROWSER_HEALTH_EXEC_TIMEOUT_MS = 20000;
@@ -266,14 +291,17 @@ const BROWSER_HEALTH_FALLBACK_VALIDATION_URL = 'http://example.com';
 const BROWSER_HEALTH_START_TIMEOUT_MS = 30000;
 const BROWSER_HEALTH_OPEN_TIMEOUT_MS = 40000;
 const BROWSER_HEALTH_SNAPSHOT_TIMEOUT_MS = 45000;
+const BROWSER_HEALTH_GATEWAY_READY_TIMEOUT_MS = 60 * 1000;
+const BROWSER_HEALTH_GATEWAY_READY_POLL_INTERVAL_MS = 1500;
+const BROWSER_SELF_HEAL_GATEWAY_READY_TIMEOUT_MS = 2 * 60 * 1000;
+const BROWSER_SELF_HEAL_PLUGIN_REGISTRY_REFRESH_TIMEOUT_MS = 45 * 1000;
 const BROWSER_SELF_HEAL_STOP_TIMEOUT_MS = 8000;
 const BROWSER_SELF_HEAL_RESET_PROFILE_TIMEOUT_MS = 45000;
-const OPENCLAW_DEVICE_PAIRING_TIMEOUT_MS = 15000;
 const BROWSER_POST_RESTART_WARMUP_DELAY_MS = 8000;
 const BROWSER_POST_RESTART_WARMUP_MARKER_MAX_AGE_MS = 30 * 60 * 1000;
 const BROWSER_HEADED_MODE_RESTART_TIMEOUT_MS = 3 * 60 * 1000;
 const BROWSER_HEADED_MODE_RESTART_POLL_INTERVAL_MS = 1500;
-const UPDATE_SCRIPT_URL = 'https://raw.githubusercontent.com/Bumingxin/SmartOffice/main/update.sh';
+const UPDATE_SCRIPT_URL = 'https://raw.githubusercontent.com/liandu2024/OpenClaw-Chat-Gateway/main/update.sh';
 const UPDATE_PHASE_MARKER_PREFIX = '::clawui-update-phase::';
 const UPDATE_LOG_LIMIT = 200;
 const UPDATE_CANCEL_KILL_TIMEOUT_MS = 5000;
@@ -500,12 +528,6 @@ type DevicePairingStatusSnapshot = {
   rawDetail: string | null;
 };
 
-type DevicePairingGatewayConnectionConfig = {
-  gatewayUrl: string;
-  token?: string;
-  password?: string;
-};
-
 type OpenClawLocalDevicePairingList = {
   pending?: unknown[];
   paired?: unknown[];
@@ -548,11 +570,13 @@ const UPDATE_RESTART_STEP_IDS: UpdateRestartStepId[] = [
 ];
 const OPENCLAW_LATEST_VERSION_CACHE_TTL_MS = 60 * 1000;
 const OPENCLAW_GATEWAY_HEALTH_PROBE_TIMEOUTS_MS = [700, 1000] as const;
-const OPENCLAW_GATEWAY_READY_PROBE_TIMEOUT_MS = 5000;
-const OPENCLAW_GATEWAY_READY_PROBE_STEP_TIMEOUT_MS = 2000;
+const OPENCLAW_GATEWAY_READY_PROBE_TIMEOUT_MS = 20000;
+const OPENCLAW_GATEWAY_READY_PROBE_STEP_TIMEOUT_MS = 5000;
 const OPENCLAW_GATEWAY_READY_RESULT_CACHE_TTL_MS = 3000;
 const OPENCLAW_GATEWAY_RESTART_STABLE_WINDOW_MS = 20 * 1000;
+const OPENCLAW_GATEWAY_MANUAL_RESTART_STABLE_WINDOW_MS = 5 * 1000;
 const OPENCLAW_UPDATE_RUNTIME_RECONCILE_INTERVAL_MS = 1200;
+const OPENCLAW_UPDATE_GATEWAY_RECOVERY_POLL_INTERVAL_MS = 5 * 1000;
 const OPENCLAW_UPDATE_SUCCESS_AUTO_RESET_MS = 5000;
 const OPENCLAW_GATEWAY_SERVICE_NAME = 'openclaw-gateway.service';
 const HOST_TAKEOVER_SYSTEM_HELPER_PATH = '/usr/local/lib/openclaw-host-takeover/run';
@@ -776,9 +800,9 @@ let updateRestartResumeTask: Promise<void> | null = null;
 let activeGatewayRestartTask: Promise<void> | null = null;
 let cachedGatewayProbeKey: string | null = null;
 let cachedGatewayProbeResult:
-  | { checkedAt: number; result: { connected: boolean; message?: string; source: 'local-runtime' | 'auth-probe' } }
+  | { checkedAt: number; result: GatewayConnectionProbeResult }
   | null = null;
-const gatewayProbeInflight = new Map<string, Promise<{ connected: boolean; message?: string; source: 'local-runtime' | 'auth-probe' }>>();
+const gatewayProbeInflight = new Map<string, Promise<GatewayConnectionProbeResult>>();
 let gatewayRestartReconcileStableSinceMs: number | null = null;
 
 function appendUpdateLog(message: string) {
@@ -1108,7 +1132,7 @@ function scheduleOpenClawUpdateSuccessFinalization(options: {
       appendOpenClawUpdateLog('Waiting for OpenClaw gateway connection to stabilize after the update.');
       await waitForGatewayConnectionStable(BROWSER_HEADED_MODE_RESTART_TIMEOUT_MS, {
         minimumStableWindowMs: OPENCLAW_GATEWAY_RESTART_STABLE_WINDOW_MS,
-        probeIntervalMs: OPENCLAW_UPDATE_RUNTIME_RECONCILE_INTERVAL_MS,
+        probeIntervalMs: OPENCLAW_UPDATE_GATEWAY_RECOVERY_POLL_INTERVAL_MS,
       });
       patchOpenClawUpdateSnapshot({
         status: 'update_succeeded',
@@ -1120,6 +1144,7 @@ function scheduleOpenClawUpdateSuccessFinalization(options: {
         rawDetail: null,
       });
       appendOpenClawUpdateLog(options.successLogMessage);
+      scheduleOpenClawImageProviderCacheRefresh('OpenClaw update success');
       scheduleOpenClawUpdateSuccessAutoReset();
     } catch (error) {
       const detail = readCliErrorDetail(error) || (error instanceof Error ? error.message : String(error));
@@ -1213,6 +1238,37 @@ async function reconcileOpenClawUpdateSnapshotFromRuntime() {
 async function buildOpenClawUpdateStatusResponseAsync(): Promise<OpenClawUpdateSnapshot> {
   await reconcileOpenClawUpdateSnapshotFromRuntime();
   return buildOpenClawUpdateStatusResponse();
+}
+
+async function continueOpenClawUpdateRecoveryIfTargetVersionInstalled(options: {
+  latestVersion: string;
+  detail: string;
+}): Promise<boolean> {
+  const observedVersion = await readOpenClawVersion();
+  if (observedVersion !== options.latestVersion) {
+    return false;
+  }
+
+  patchOpenClawUpdatePhaseState('verifying-version', {
+    currentVersion: observedVersion,
+    latestVersion: options.latestVersion,
+    canCancel: false,
+    rawDetail: null,
+  });
+  appendOpenClawUpdateLog(
+    `OpenClaw ${observedVersion} is installed; continuing gateway recovery checks every ${
+      Math.round(OPENCLAW_UPDATE_GATEWAY_RECOVERY_POLL_INTERVAL_MS / 1000)
+    } seconds instead of failing on the first restart probe.`
+  );
+  if (options.detail) {
+    appendOpenClawUpdateLog(`Initial gateway recovery detail: ${options.detail}`);
+  }
+  void scheduleOpenClawUpdateSuccessFinalization({
+    currentVersion: observedVersion,
+    latestVersion: options.latestVersion,
+    successLogMessage: `OpenClaw update completed successfully after gateway recovery. Current version: ${observedVersion}.`,
+  });
+  return true;
 }
 
 function collectOpenClawUpdateTextFragments(value: unknown, fragments: string[] = [], seen = new Set<string>()) {
@@ -1419,8 +1475,9 @@ async function startOpenClawUpdateTask() {
     resetOpenClawUpdateSnapshot();
     throw new StructuredRequestError(409, OPENCLAW_UPDATE_NO_NEW_VERSION_ERROR_CODE, 'No newer OpenClaw version is available.');
   }
+  const targetVersion = latestInfo.latestVersion;
 
-  const executablePath = await ensureResolvedOpenClawExecutablePath(latestInfo.latestVersion);
+  const executablePath = await ensureResolvedOpenClawExecutablePath(targetVersion);
   const child = spawn(executablePath, ['update', '--json', '--yes'], {
     detached: true,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -1439,10 +1496,10 @@ async function startOpenClawUpdateTask() {
   patchOpenClawUpdatePhaseState('download-package', {
     status: 'updating',
     currentVersion: latestInfo.currentVersion,
-    latestVersion: latestInfo.latestVersion,
+    latestVersion: targetVersion,
     rawDetail: null,
   });
-  appendOpenClawUpdateLog(`Starting OpenClaw update to ${latestInfo.latestVersion}.`);
+  appendOpenClawUpdateLog(`Starting OpenClaw update to ${targetVersion}.`);
 
   activeOpenClawUpdateProcess.phaseTimer = setTimeout(() => {
     if (
@@ -1492,7 +1549,7 @@ async function startOpenClawUpdateTask() {
     if (code === 0) {
       try {
         patchOpenClawUpdatePhaseState('repair-command-entrypoint');
-        const resolvedExecutablePath = await ensureResolvedOpenClawExecutablePath(latestInfo.latestVersion);
+        const resolvedExecutablePath = await ensureResolvedOpenClawExecutablePath(targetVersion);
         await ensureOpenClawShellEntrypoint(resolvedExecutablePath);
         appendOpenClawUpdateLog('Verified and repaired the OpenClaw shell entrypoint.');
         patchOpenClawUpdatePhaseState('verifying-version');
@@ -1518,6 +1575,14 @@ async function startOpenClawUpdateTask() {
 
     const detail = openClawUpdateSnapshot.rawDetail
       || `OpenClaw update exited with ${signal ? `signal ${signal}` : `code ${String(code)}`}.`;
+    const continuingRecovery = await continueOpenClawUpdateRecoveryIfTargetVersionInstalled({
+      latestVersion: targetVersion,
+      detail,
+    });
+    if (continuingRecovery) {
+      return;
+    }
+
     patchOpenClawUpdateSnapshot({
       status: 'update_failed',
       phase: 'running-update',
@@ -1583,7 +1648,7 @@ async function cancelOpenClawUpdateTask() {
 }
 
 function getCurrentClawUiPort() {
-  return normalizeCliText(process.env.PORT) || '3456';
+  return normalizeCliText(process.env.PORT) || '3115';
 }
 
 function resolveClawUiServiceName() {
@@ -1596,7 +1661,7 @@ function resolveClawUiServiceName() {
   }
 
   const legacyPath = path.join(serviceDir, 'clawui.service');
-  if (currentPort === '3456' && fs.existsSync(legacyPath)) {
+  if (currentPort === '3115' && fs.existsSync(legacyPath)) {
     return 'clawui.service';
   }
 
@@ -1647,12 +1712,38 @@ function normalizeCliText(value: unknown): string {
   return typeof value === 'string' && value.trim() ? value.trim() : '';
 }
 
-function isLoopbackHostname(hostname: string): boolean {
+function normalizeGatewayHostname(hostname: string): string {
   const normalized = normalizeCliText(hostname).toLowerCase();
+  return normalized.startsWith('[') && normalized.endsWith(']')
+    ? normalized.slice(1, -1)
+    : normalized;
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = normalizeGatewayHostname(hostname);
   return normalized === '127.0.0.1'
     || normalized === 'localhost'
-    || normalized === '::1'
-    || normalized === '[::1]';
+    || normalized === '::1';
+}
+
+function isLocalGatewayHostname(hostname: string): boolean {
+  const normalized = normalizeGatewayHostname(hostname);
+  if (!normalized) return false;
+  if (isLoopbackHostname(normalized)) return true;
+
+  const localNames = new Set<string>([
+    normalizeGatewayHostname(os.hostname()),
+    '0.0.0.0',
+    '::',
+  ]);
+
+  for (const entries of Object.values(os.networkInterfaces())) {
+    for (const entry of entries || []) {
+      localNames.add(normalizeGatewayHostname(entry.address));
+    }
+  }
+
+  return localNames.has(normalized);
 }
 
 function parseGatewayUrlForStatusProbe(gatewayUrl: string): { hostname: string; port: number | null } | null {
@@ -1787,6 +1878,21 @@ function normalizeFallbackMode(value: unknown): 'inherit' | 'custom' | 'disabled
   return value === 'inherit' || value === 'custom' || value === 'disabled' ? value : undefined;
 }
 
+function normalizeAgentRuntimeMode(value: unknown): AgentRuntimeMode {
+  return value === 'direct' ? 'direct' : 'configured';
+}
+
+function normalizeAgentSystemPromptMode(value: unknown): AgentSystemPromptMode {
+  return value === 'agent' ? 'agent' : 'system';
+}
+
+function normalizeAgentToolMode(value: unknown): AgentToolMode {
+  if (value === 'coding' || value === 'messaging' || value === 'minimal' || value === 'off') {
+    return value;
+  }
+  return 'full';
+}
+
 function normalizeFallbackList(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
 
@@ -1800,6 +1906,762 @@ function normalizeFallbackList(value: unknown): string[] {
     normalized.push(trimmed);
   }
   return normalized;
+}
+
+type OpenClawImageProviderEntry = {
+  id: string;
+  label: string;
+  available: boolean;
+  configured: boolean;
+  selected: boolean;
+  defaultModel: string | null;
+  models: string[];
+  capabilities: Record<string, any>;
+};
+
+type OpenClawImageProviderSnapshot = {
+  providers: OpenClawImageProviderEntry[];
+  models: Array<{
+    id: string;
+    alias: string;
+    providerId: string;
+    providerLabel: string;
+    model: string;
+    available: boolean;
+    configured: boolean;
+    selected: boolean;
+    input: string[];
+  }>;
+  updatedAt: string;
+  cache?: {
+    source: 'database' | 'openclaw';
+    status: 'success' | 'error';
+    updatedAt: string | null;
+    openclawVersion: string | null;
+    errorDetail: string | null;
+  };
+};
+
+const IMAGE_PROVIDER_CACHE_KEY = 'image_generation_providers';
+const IMAGE_PROVIDER_LIST_TIMEOUT_MS = 45000;
+const IMAGE_GENERATION_TIMEOUT_MS = 600000;
+const SUPPORTED_IMAGE_ASPECT_RATIOS = new Set(['1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9']);
+let imageProviderListRefreshInFlight: Promise<OpenClawImageProviderSnapshot> | null = null;
+
+type DirectImageGenerationResult = {
+  content: string;
+  processContent: string;
+  modelUsed: string;
+  imagePath: string;
+};
+
+function parseCliJsonOutput(stdout: string): unknown {
+  const trimmed = stdout.trim();
+  if (!trimmed) {
+    throw new Error('OpenClaw image provider list returned no JSON output.');
+  }
+
+  try {
+    return JSON.parse(trimmed);
+  } catch {}
+
+  const firstArray = trimmed.indexOf('[');
+  const lastArray = trimmed.lastIndexOf(']');
+  if (firstArray !== -1 && lastArray > firstArray) {
+    return JSON.parse(trimmed.slice(firstArray, lastArray + 1));
+  }
+
+  const firstObject = trimmed.indexOf('{');
+  const lastObject = trimmed.lastIndexOf('}');
+  if (firstObject !== -1 && lastObject > firstObject) {
+    return JSON.parse(trimmed.slice(firstObject, lastObject + 1));
+  }
+
+  throw new Error('OpenClaw image provider list did not contain parseable JSON.');
+}
+
+async function runOpenClawImageProviderListCli(timeoutMs = IMAGE_PROVIDER_LIST_TIMEOUT_MS): Promise<unknown> {
+  const executablePath = await ensureResolvedOpenClawExecutablePath();
+  return new Promise((resolve, reject) => {
+    const child = spawn(executablePath, ['infer', 'image', 'providers', '--json'], {
+      detached: true,
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    let killTimer: NodeJS.Timeout | null = null;
+    let timedOut = false;
+
+    const signalChildGroup = (signal: NodeJS.Signals) => {
+      if (!child.pid) return;
+      try {
+        process.kill(-child.pid, signal);
+      } catch {
+        try { child.kill(signal); } catch {}
+      }
+    };
+
+    const terminateChildGroup = () => {
+      signalChildGroup('SIGTERM');
+      killTimer = setTimeout(() => signalChildGroup('SIGKILL'), 1000);
+      killTimer.unref();
+    };
+
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
+    };
+
+    const finishSuccess = (value: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      terminateChildGroup();
+      resolve(value);
+    };
+
+    const finishError = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      terminateChildGroup();
+      reject(error);
+    };
+
+    const tryFinishFromStdout = () => {
+      try {
+        finishSuccess(parseCliJsonOutput(stdout));
+      } catch {}
+    };
+
+    const timer = setTimeout(() => {
+      try {
+        finishSuccess(parseCliJsonOutput(stdout));
+        return;
+      } catch {}
+
+      timedOut = true;
+      signalChildGroup('SIGTERM');
+      killTimer = setTimeout(() => signalChildGroup('SIGKILL'), 35000);
+      killTimer.unref();
+    }, timeoutMs);
+
+    child.stdout?.on('data', (chunk) => {
+      stdout += chunk.toString();
+      if (stdout.length > 1024 * 1024) {
+        finishError(new Error('OpenClaw image provider list output is too large.'));
+        return;
+      }
+      tryFinishFromStdout();
+    });
+
+    child.stderr?.on('data', (chunk) => {
+      stderr += chunk.toString();
+      if (stderr.length > 1024 * 1024) {
+        stderr = stderr.slice(-1024 * 1024);
+      }
+    });
+
+    child.on('error', (error) => {
+      finishError(error);
+    });
+
+    child.on('close', (code) => {
+      if (settled) return;
+      try {
+        finishSuccess(parseCliJsonOutput(stdout));
+        return;
+      } catch {}
+
+      const detail = stderr.trim() || stdout.trim() || `exit code ${code ?? 'unknown'}`;
+      finishError(new Error(timedOut
+        ? `OpenClaw image provider list timed out. ${detail}`
+        : `OpenClaw image provider list failed: ${detail}`));
+    });
+  });
+}
+
+function normalizeImageProviderSnapshot(raw: unknown): OpenClawImageProviderSnapshot {
+  const entries: any[] = Array.isArray(raw)
+    ? raw
+    : Array.isArray((raw as any)?.providers)
+      ? (raw as any).providers
+      : [];
+
+  const providers: OpenClawImageProviderEntry[] = entries
+    .map((entry: any) => {
+      const id = typeof entry?.id === 'string' ? entry.id.trim() : '';
+      if (!id) return null;
+      const label = typeof entry?.label === 'string' && entry.label.trim() ? entry.label.trim() : id;
+      const models: string[] = Array.isArray(entry?.models)
+        ? Array.from(new Set(entry.models.filter((model: unknown): model is string => typeof model === 'string' && model.trim().length > 0).map((model: string) => model.trim())))
+        : [];
+      return {
+        id,
+        label,
+        available: entry?.available !== false,
+        configured: entry?.configured === true,
+        selected: entry?.selected === true,
+        defaultModel: typeof entry?.defaultModel === 'string' && entry.defaultModel.trim() ? entry.defaultModel.trim() : null,
+        models,
+        capabilities: entry?.capabilities && typeof entry.capabilities === 'object' ? entry.capabilities : {},
+      };
+    })
+    .filter((entry): entry is OpenClawImageProviderEntry => Boolean(entry));
+
+  const models = providers.flatMap((provider) => provider.models.map((model) => ({
+    id: `${provider.id}/${model}`,
+    alias: `${provider.label} / ${model}`,
+    providerId: provider.id,
+    providerLabel: provider.label,
+    model,
+    available: provider.available,
+    configured: provider.configured,
+    selected: provider.selected,
+    input: ['image_generation'],
+  })));
+
+  return {
+    providers,
+    models,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function normalizeImageProviderCacheMeta(row: CapabilityCacheRow): OpenClawImageProviderSnapshot['cache'] {
+  return {
+    source: 'database',
+    status: row.status === 'error' ? 'error' : 'success',
+    updatedAt: normalizeCliText(row.updated_at) || null,
+    openclawVersion: normalizeCliText(row.openclaw_version) || null,
+    errorDetail: normalizeCliText(row.error_detail) || null,
+  };
+}
+
+function parseCachedOpenClawImageProviderSnapshot(row: CapabilityCacheRow | undefined): OpenClawImageProviderSnapshot | null {
+  if (!row) return null;
+
+  try {
+    const parsed = JSON.parse(row.value) as Partial<OpenClawImageProviderSnapshot>;
+    if (!Array.isArray(parsed.providers) || !Array.isArray(parsed.models)) {
+      return null;
+    }
+
+    return {
+      providers: parsed.providers as OpenClawImageProviderEntry[],
+      models: parsed.models as OpenClawImageProviderSnapshot['models'],
+      updatedAt: normalizeCliText(parsed.updatedAt) || normalizeCliText(row.updated_at) || new Date().toISOString(),
+      cache: normalizeImageProviderCacheMeta(row),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function readCachedOpenClawImageProviderSnapshot(): OpenClawImageProviderSnapshot | null {
+  return parseCachedOpenClawImageProviderSnapshot(db.getCapabilityCache(IMAGE_PROVIDER_CACHE_KEY));
+}
+
+async function readOpenClawVersionForImageProviderCache(): Promise<string | null> {
+  try {
+    const executablePath = await ensureResolvedOpenClawExecutablePath();
+    const { stdout } = await execFilePromise(executablePath, ['--version'], {
+      timeout: 5000,
+      maxBuffer: 128 * 1024,
+    });
+    const raw = normalizeCliText(stdout);
+    const matched = raw.match(/OpenClaw\s+([^\s(]+)/i);
+    return matched?.[1] || raw || null;
+  } catch {
+    return null;
+  }
+}
+
+async function refreshOpenClawImageProviderSnapshot(): Promise<OpenClawImageProviderSnapshot> {
+  if (imageProviderListRefreshInFlight) {
+    return imageProviderListRefreshInFlight;
+  }
+
+  imageProviderListRefreshInFlight = (async () => {
+    const openclawVersion = await readOpenClawVersionForImageProviderCache();
+    try {
+      const raw = await runOpenClawImageProviderListCli();
+      const snapshot = normalizeImageProviderSnapshot(raw);
+      db.upsertCapabilityCache({
+        key: IMAGE_PROVIDER_CACHE_KEY,
+        value: JSON.stringify(snapshot),
+        openclawVersion,
+        status: 'success',
+        errorDetail: null,
+      });
+      return {
+        ...snapshot,
+        cache: {
+          source: 'openclaw' as const,
+          status: 'success' as const,
+          updatedAt: snapshot.updatedAt,
+          openclawVersion,
+          errorDetail: null,
+        },
+      };
+    } catch (error) {
+      const detail = readCliErrorDetail(error) || (error instanceof Error ? error.message : String(error));
+      db.markCapabilityCacheError(IMAGE_PROVIDER_CACHE_KEY, detail, openclawVersion);
+      throw error;
+    }
+  })().finally(() => {
+    imageProviderListRefreshInFlight = null;
+  });
+
+  return imageProviderListRefreshInFlight;
+}
+
+async function readOpenClawImageProviderSnapshot(options?: {
+  refresh?: boolean;
+  allowStaleOnError?: boolean;
+}): Promise<OpenClawImageProviderSnapshot> {
+  if (!options?.refresh) {
+    const cached = readCachedOpenClawImageProviderSnapshot();
+    if (cached) {
+      return cached;
+    }
+  }
+
+  try {
+    return await refreshOpenClawImageProviderSnapshot();
+  } catch (error) {
+    if (options?.allowStaleOnError !== false) {
+      const cached = readCachedOpenClawImageProviderSnapshot();
+      if (cached) {
+        return cached;
+      }
+    }
+    throw error;
+  }
+}
+
+function getConfiguredDirectImageGenerationModel(): string | null {
+  const candidates = getConfiguredDirectImageGenerationCandidates();
+  return candidates[0] || null;
+}
+
+function getConfiguredDirectImageGenerationCandidates(): string[] {
+  const config = agentProvisioner.readImageGenerationModelConfig();
+  const primary = normalizeCliText(config.primary);
+  if (!primary) return [];
+
+  const seen = new Set<string>();
+  const candidates: string[] = [];
+  for (const modelId of [primary, ...config.fallbacks]) {
+    const normalized = normalizeCliText(modelId);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    candidates.push(normalized);
+  }
+  return candidates;
+}
+
+function buildInlineLocalFileUrl(absolutePath: string): string {
+  const encodedPath = Buffer.from(absolutePath).toString('base64');
+  return `/api/files/download?path=${encodeURIComponent(encodedPath)}&disposition=inline`;
+}
+
+function buildImageGenerationOutputPath(outputDir: string): string {
+  fs.mkdirSync(outputDir, { recursive: true });
+  const safeTimestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const suffix = Math.random().toString(36).slice(2, 10);
+  return path.join(outputDir, `image-${safeTimestamp}-${suffix}.png`);
+}
+
+function buildImageGenerationStartProcessContent(modelId: string): string {
+  const locale = normalizeGroupToolProgressLocale(configManager.getConfig().language);
+  if (locale === 'en') {
+    return `Calling image generation model: ${modelId}`;
+  }
+  if (locale === 'zh-TW') {
+    return `正在呼叫圖像生成模型：${modelId}`;
+  }
+  return `正在调用图像生成模型：${modelId}`;
+}
+
+function resolveImageGenerationAspectRatioHint(prompt: string): string | null {
+  const normalized = prompt.replace(/[：]/g, ':');
+  const ratioMatch = normalized.match(/(?:^|[^\d])(\d{1,2}\s*:\s*\d{1,2})(?=$|[^\d])/);
+  if (!ratioMatch) return null;
+
+  const ratio = ratioMatch[1].replace(/\s+/g, '');
+  return SUPPORTED_IMAGE_ASPECT_RATIOS.has(ratio) ? ratio : null;
+}
+
+function resolveImageGenerationSize(prompt: string): string {
+  const aspectRatio = resolveImageGenerationAspectRatioHint(prompt);
+  if (aspectRatio === '1:1') return '1024x1024';
+  if (aspectRatio === '3:2' || aspectRatio === '4:3' || aspectRatio === '5:4' || aspectRatio === '16:9' || aspectRatio === '21:9') {
+    return '1536x1024';
+  }
+  if (aspectRatio === '2:3' || aspectRatio === '3:4' || aspectRatio === '4:5' || aspectRatio === '9:16') {
+    return '1024x1536';
+  }
+  return '1024x1024';
+}
+
+function buildImageGenerationProcessContent(modelId: string, imagePath: string): string {
+  const locale = normalizeGroupToolProgressLocale(configManager.getConfig().language);
+  if (locale === 'en') {
+    return `Calling image generation model: ${modelId}\nImage generated: ${imagePath}`;
+  }
+  if (locale === 'zh-TW') {
+    return `正在呼叫圖像生成模型：${modelId}\n圖像已生成：${imagePath}`;
+  }
+  return `正在调用图像生成模型：${modelId}\n图像已生成：${imagePath}`;
+}
+
+function buildImageGenerationRequestUrl(endpoint: ImageGenerationEndpointModelSnapshot): string {
+  return `${endpoint.baseUrl.replace(/\/+$/, '')}/images/generations`;
+}
+
+function hasHeader(headers: Record<string, string>, name: string): boolean {
+  const normalized = name.toLowerCase();
+  return Object.keys(headers).some((key) => key.toLowerCase() === normalized);
+}
+
+function buildImageGenerationRequestHeaders(endpoint: ImageGenerationEndpointModelSnapshot): Record<string, string> {
+  const headers: Record<string, string> = {
+    ...(endpoint.headers || {}),
+    'Content-Type': 'application/json',
+  };
+
+  const authHeader = endpoint.authHeader || 'Authorization';
+  if (!hasHeader(headers, authHeader)) {
+    headers[authHeader] = authHeader.toLowerCase() === 'authorization'
+      ? `Bearer ${endpoint.apiKey}`
+      : endpoint.apiKey;
+  }
+
+  return headers;
+}
+
+function sanitizeImageGenerationErrorDetail(detail: string, endpoint?: ImageGenerationEndpointModelSnapshot): string {
+  const normalized = normalizeCliText(detail);
+  if (!normalized) return 'Image generation request failed.';
+
+  let sanitized = normalized;
+  const secret = endpoint?.apiKey;
+  if (secret && secret.length >= 6) {
+    sanitized = sanitized.split(secret).join('[redacted]');
+  }
+
+  return sanitized.length > 2000 ? `${sanitized.slice(0, 2000)}...` : sanitized;
+}
+
+function getHttpErrorResponse(error: any): { status?: number; statusText?: string; data?: unknown } | null {
+  if (axios.isAxiosError(error)) {
+    return error.response || null;
+  }
+  if (error?.response && typeof error.response === 'object') {
+    return error.response;
+  }
+  return null;
+}
+
+function extractImageGenerationErrorDetail(error: any, endpoint?: ImageGenerationEndpointModelSnapshot): string {
+  const response = getHttpErrorResponse(error);
+  if (response) {
+    const status = response.status;
+    const statusText = normalizeCliText(response.statusText);
+    const data = response.data;
+    const bodyText = (() => {
+      if (!data) return '';
+      if (typeof data === 'string') return data;
+      if (data instanceof Buffer) return data.toString('utf8');
+      const message = normalizeCliText((data as any)?.error?.message)
+        || normalizeCliText((data as any)?.message)
+        || normalizeCliText((data as any)?.detail)
+        || normalizeCliText((data as any)?.error);
+      return message || JSON.stringify(data);
+    })();
+
+    if (status) {
+      return sanitizeImageGenerationErrorDetail(
+        `HTTP ${status}${statusText ? ` ${statusText}` : ''}${bodyText ? ` - ${bodyText}` : ''}`,
+        endpoint,
+      );
+    }
+  }
+
+  if (axios.isAxiosError(error)) {
+    if (error.code === 'ECONNABORTED') {
+      return `Image generation request timed out after ${IMAGE_GENERATION_TIMEOUT_MS}ms.`;
+    }
+
+    return sanitizeImageGenerationErrorDetail(error.message, endpoint);
+  }
+
+  return sanitizeImageGenerationErrorDetail(error instanceof Error ? error.message : String(error), endpoint);
+}
+
+function isRetryableImageGenerationRequestError(error: any): boolean {
+  const status = getHttpErrorResponse(error)?.status;
+  return status === 400 || status === 422;
+}
+
+function parseBase64ImageData(value: string): Buffer | null {
+  const normalized = normalizeCliText(value);
+  if (!normalized) return null;
+
+  const dataUriMatch = normalized.match(/^data:[^;]+;base64,(.+)$/i);
+  const rawBase64 = dataUriMatch ? dataUriMatch[1] : normalized;
+  try {
+    const buffer = Buffer.from(rawBase64, 'base64');
+    return buffer.length > 0 ? buffer : null;
+  } catch {
+    return null;
+  }
+}
+
+function findGeneratedImageBase64(payload: any): string | null {
+  const dataEntries = Array.isArray(payload?.data) ? payload.data : [];
+  const imageEntries = Array.isArray(payload?.images) ? payload.images : [];
+  const entries = [...dataEntries, ...imageEntries];
+
+  for (const entry of entries) {
+    const value = normalizeCliText(entry?.b64_json)
+      || normalizeCliText(entry?.base64)
+      || normalizeCliText(entry?.image_base64)
+      || normalizeCliText(entry?.image?.b64_json)
+      || normalizeCliText(entry?.image?.base64);
+    if (value) return value;
+  }
+
+  return normalizeCliText(payload?.b64_json)
+    || normalizeCliText(payload?.base64)
+    || normalizeCliText(payload?.image_base64)
+    || null;
+}
+
+function findGeneratedImageUrl(payload: any): string | null {
+  const dataEntries = Array.isArray(payload?.data) ? payload.data : [];
+  const imageEntries = Array.isArray(payload?.images) ? payload.images : [];
+  const entries = [...dataEntries, ...imageEntries];
+
+  for (const entry of entries) {
+    const value = normalizeCliText(entry?.url)
+      || normalizeCliText(entry?.image_url?.url)
+      || normalizeCliText(entry?.image?.url);
+    if (value) return value;
+  }
+
+  return normalizeCliText(payload?.url)
+    || normalizeCliText(payload?.image_url?.url)
+    || null;
+}
+
+async function writeGeneratedImageUrlToFile(endpoint: ImageGenerationEndpointModelSnapshot, imageUrl: string, outputPath: string): Promise<void> {
+  if (/^data:[^;]+;base64,/i.test(imageUrl)) {
+    const buffer = parseBase64ImageData(imageUrl);
+    if (!buffer) throw new Error('Image generation returned an unreadable data URL.');
+    fs.writeFileSync(outputPath, buffer);
+    return;
+  }
+
+  const resolvedUrl = new URL(imageUrl, endpoint.baseUrl).toString();
+  const response = await axios.get<ArrayBuffer>(resolvedUrl, {
+    responseType: 'arraybuffer',
+    timeout: IMAGE_GENERATION_TIMEOUT_MS,
+    validateStatus: () => true,
+  });
+
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(`Image download failed: HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ''}`);
+  }
+
+  fs.writeFileSync(outputPath, Buffer.from(response.data));
+}
+
+async function writeOpenAICompatibleImageResponseToFile(
+  endpoint: ImageGenerationEndpointModelSnapshot,
+  payload: unknown,
+  outputPath: string,
+): Promise<void> {
+  const base64Image = findGeneratedImageBase64(payload as any);
+  if (base64Image) {
+    const buffer = parseBase64ImageData(base64Image);
+    if (!buffer) throw new Error('Image generation returned unreadable base64 data.');
+    fs.writeFileSync(outputPath, buffer);
+    return;
+  }
+
+  const imageUrl = findGeneratedImageUrl(payload as any);
+  if (imageUrl) {
+    await writeGeneratedImageUrlToFile(endpoint, imageUrl, outputPath);
+    return;
+  }
+
+  throw new Error('Image generation completed without image data.');
+}
+
+function buildImageGenerationRequestBodies(endpoint: ImageGenerationEndpointModelSnapshot, prompt: string): Array<Record<string, unknown>> {
+  const baseBody = {
+    model: endpoint.modelName,
+    prompt,
+    n: 1,
+  };
+  const size = resolveImageGenerationSize(prompt);
+
+  return [
+    { ...baseBody, size, response_format: 'b64_json' },
+    { ...baseBody, size },
+    { ...baseBody, response_format: 'b64_json' },
+    baseBody,
+  ];
+}
+
+async function generateImageThroughEndpoint(
+  endpoint: ImageGenerationEndpointModelSnapshot,
+  prompt: string,
+  outputPath: string,
+): Promise<string> {
+  const url = buildImageGenerationRequestUrl(endpoint);
+  const headers = buildImageGenerationRequestHeaders(endpoint);
+  let lastError: unknown = null;
+
+  for (const body of buildImageGenerationRequestBodies(endpoint, prompt)) {
+    try {
+      const response = await axios.post(url, body, {
+        headers,
+        timeout: IMAGE_GENERATION_TIMEOUT_MS,
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+        validateStatus: () => true,
+      });
+
+      if (response.status < 200 || response.status >= 300) {
+        const error: any = new Error(`HTTP ${response.status}`);
+        error.response = response;
+        throw error;
+      }
+
+      await writeOpenAICompatibleImageResponseToFile(endpoint, response.data, outputPath);
+      if (!fs.existsSync(outputPath)) {
+        throw new Error('Image generation completed without a readable output file.');
+      }
+      return outputPath;
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableImageGenerationRequestError(error)) {
+        break;
+      }
+    }
+  }
+
+  throw new Error(extractImageGenerationErrorDetail(lastError, endpoint));
+}
+
+async function tryGenerateImageForPrompt(params: {
+  prompt: string;
+  intentText?: string;
+  intentContext?: Array<string | null | undefined> | string | null;
+  outputDir: string;
+}): Promise<DirectImageGenerationResult | null> {
+  const candidates = getConfiguredDirectImageGenerationCandidates();
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  const intentText = normalizeCliText(params.intentText) || params.prompt;
+  if (!shouldUseConfiguredImageGenerationModel(intentText, params.intentContext)) {
+    return null;
+  }
+
+  const prompt = normalizeCliText(params.prompt);
+  if (!prompt) {
+    return null;
+  }
+
+  const outputPath = buildImageGenerationOutputPath(params.outputDir);
+  const attempts: string[] = [];
+
+  for (const modelId of candidates) {
+    const endpoint = agentProvisioner.readImageGenerationEndpointModel(modelId);
+    if (!endpoint) {
+      attempts.push(`${modelId}: endpoint configuration is incomplete.`);
+      continue;
+    }
+
+    try {
+      if (fs.existsSync(outputPath)) fs.rmSync(outputPath, { force: true });
+      const imagePath = await generateImageThroughEndpoint(endpoint, prompt, outputPath);
+      const filename = path.basename(imagePath);
+      return {
+        content: `![${filename}](${buildInlineLocalFileUrl(imagePath)})`,
+        processContent: buildImageGenerationProcessContent(modelId, imagePath),
+        modelUsed: modelId,
+        imagePath,
+      };
+    } catch (error: any) {
+      attempts.push(`${modelId}: ${extractImageGenerationErrorDetail(error, endpoint)}`);
+    }
+  }
+
+  const detail = attempts.length > 0
+    ? `Image generation failed. ${attempts.join(' | ')}`
+    : 'Image generation failed.';
+  const nextError = new Error(detail);
+  (nextError as Error & { rawDetail?: string }).rawDetail = detail;
+  throw nextError;
+}
+
+function scheduleOpenClawImageProviderCacheRefresh(reason: string) {
+  refreshOpenClawImageProviderSnapshot().catch((error) => {
+    const detail = readCliErrorDetail(error) || (error instanceof Error ? error.message : String(error));
+    console.warn(`[OpenClawImageProviders] Failed to refresh provider cache during ${reason}: ${detail}`);
+  });
+}
+
+function findImageProviderModel(snapshot: OpenClawImageProviderSnapshot, modelRef: string) {
+  const normalizedRef = modelRef.trim();
+  if (!normalizedRef) return null;
+  return snapshot.models.find((model) => model.id === normalizedRef) || null;
+}
+
+function collectImageProviderModelNameCandidates(value: string): string[] {
+  const normalizedName = value.trim().replace(/^\/+|\/+$/g, '');
+  if (!normalizedName) return [];
+
+  const candidates = [normalizedName];
+  const firstSlashIndex = normalizedName.indexOf('/');
+  if (firstSlashIndex >= 0) {
+    const suffix = normalizedName.slice(firstSlashIndex + 1).replace(/^\/+|\/+$/g, '');
+    if (suffix) {
+      candidates.push(suffix);
+    }
+  }
+
+  const lastSlashIndex = normalizedName.lastIndexOf('/');
+  if (lastSlashIndex > firstSlashIndex) {
+    const suffix = normalizedName.slice(lastSlashIndex + 1).replace(/^\/+|\/+$/g, '');
+    if (suffix) {
+      candidates.push(suffix);
+    }
+  }
+
+  return Array.from(new Set(candidates));
+}
+
+function findImageProviderModelByName(snapshot: OpenClawImageProviderSnapshot, modelName: string) {
+  const candidates = collectImageProviderModelNameCandidates(modelName);
+  if (candidates.length === 0) return null;
+  return snapshot.models.find((model) => candidates.includes(model.model)) || null;
+}
+
+function summarizeImageProviderModels(snapshot: OpenClawImageProviderSnapshot, limit = 16): string {
+  const ids = snapshot.models.map((model) => model.id);
+  if (ids.length === 0) return 'No image generation models were reported by OpenClaw.';
+  const visible = ids.slice(0, limit).join(', ');
+  return ids.length > limit ? `${visible}, ...` : visible;
 }
 
 function getOpenClawConfigPath() {
@@ -3040,31 +3902,10 @@ function normalizeDevicePairingStatusSnapshot(raw: any, rawDetail?: string | nul
 
 let cachedOpenClawLocalDevicePairingApiPromise: Promise<OpenClawLocalDevicePairingApi> | null = null;
 
-function readConfiguredDevicePairingGatewayConnection(): DevicePairingGatewayConnectionConfig {
-  const config = configManager.getConfig();
-  return {
-    gatewayUrl: normalizeCliText(config.gatewayUrl) || 'ws://127.0.0.1:18789',
-    token: normalizeCliText(config.token) || undefined,
-    password: normalizeCliText(config.password) || undefined,
-  };
-}
-
-function shouldUseLocalDevicePairingFallback(
-  config: DevicePairingGatewayConnectionConfig,
-  error: unknown,
-) {
-  const detail = normalizeCliText(readCliErrorDetail(error) || (error as any)?.message).toLowerCase();
-  if (!detail.includes('pairing required')) {
-    return false;
-  }
-
-  const gatewayTarget = parseGatewayUrlForStatusProbe(config.gatewayUrl);
-  if (!gatewayTarget || !isLoopbackHostname(gatewayTarget.hostname)) {
-    return false;
-  }
-
-  return evaluateLocalGatewayCredentialMatch(config, gatewayTarget) !== false;
-}
+const importOpenClawEsmModule = new Function(
+  'specifier',
+  'return import(specifier)'
+) as (specifier: string) => Promise<unknown>;
 
 async function loadOpenClawLocalDevicePairingApi(): Promise<OpenClawLocalDevicePairingApi> {
   if (!cachedOpenClawLocalDevicePairingApiPromise) {
@@ -3085,7 +3926,7 @@ async function loadOpenClawLocalDevicePairingApi(): Promise<OpenClawLocalDeviceP
           continue;
         }
 
-        const imported = await import(pathToFileURL(apiPath).href) as Partial<OpenClawLocalDevicePairingApi>;
+        const imported = await importOpenClawEsmModule(pathToFileURL(apiPath).href) as Partial<OpenClawLocalDevicePairingApi>;
         if (
           typeof imported.listDevicePairing === 'function'
           && typeof imported.approveDevicePairing === 'function'
@@ -3106,50 +3947,19 @@ async function loadOpenClawLocalDevicePairingApi(): Promise<OpenClawLocalDeviceP
   }
 }
 
-async function listDevicePairingStatusFromGatewayOrLocalFallback() {
-  const connection = readConfiguredDevicePairingGatewayConnection();
-  const client = new OpenClawClient(connection);
-
-  try {
-    const list = await client.call('device.pair.list', {}, OPENCLAW_DEVICE_PAIRING_TIMEOUT_MS);
-    return normalizeDevicePairingStatusSnapshot(list);
-  } catch (error) {
-    if (!shouldUseLocalDevicePairingFallback(connection, error)) {
-      throw error;
-    }
-
-    const localApi = await loadOpenClawLocalDevicePairingApi();
-    const localList = await localApi.listDevicePairing();
-    return normalizeDevicePairingStatusSnapshot(localList);
-  } finally {
-    client.disconnect();
-  }
+async function listLocalDevicePairingStatus() {
+  const localApi = await loadOpenClawLocalDevicePairingApi();
+  const localList = await localApi.listDevicePairing();
+  return normalizeDevicePairingStatusSnapshot(localList);
 }
 
-async function approveDevicePairingRequestFromGatewayOrLocalFallback(requestId: string) {
-  const connection = readConfiguredDevicePairingGatewayConnection();
-  const client = new OpenClawClient(connection);
-
-  try {
-    return await client.call(
-      'device.pair.approve',
-      { requestId },
-      OPENCLAW_DEVICE_PAIRING_TIMEOUT_MS,
-    );
-  } catch (error) {
-    if (!shouldUseLocalDevicePairingFallback(connection, error)) {
-      throw error;
-    }
-
-    const localApi = await loadOpenClawLocalDevicePairingApi();
-    return await localApi.approveDevicePairing(requestId, { callerScopes: ['operator.admin'] });
-  } finally {
-    client.disconnect();
-  }
+async function approveLocalDevicePairingRequest(requestId: string) {
+  const localApi = await loadOpenClawLocalDevicePairingApi();
+  return await localApi.approveDevicePairing(requestId, { callerScopes: ['operator.admin'] });
 }
 
 async function readDevicePairingStatus(): Promise<DevicePairingStatusSnapshot> {
-  return listDevicePairingStatusFromGatewayOrLocalFallback();
+  return listLocalDevicePairingStatus();
 }
 
 async function safeReadDevicePairingStatus(): Promise<DevicePairingStatusSnapshot> {
@@ -3176,7 +3986,7 @@ async function approveLatestDevicePairingRequest() {
     );
   }
 
-  const approved = await approveDevicePairingRequestFromGatewayOrLocalFallback(latestPending.requestId);
+  const approved = await approveLocalDevicePairingRequest(latestPending.requestId);
   if (approved?.status === 'forbidden') {
     throw new StructuredRequestError(
       403,
@@ -3690,15 +4500,23 @@ function buildGatewayProbeCacheKey(params: {
 type GatewayConnectionProbeResult = {
   connected: boolean;
   message?: string;
-  source: 'local-runtime' | 'auth-probe';
+  source: 'local-runtime' | 'auth-probe' | 'active-session';
 };
 
 async function probeGatewayConnectionStatus(params: {
   gatewayUrl: string;
   token?: string;
   password?: string;
-}): Promise<GatewayConnectionProbeResult> {
-  const probeKey = buildGatewayProbeCacheKey(params);
+}, options: {
+  preferLocalHealth?: boolean;
+  allowRpcProbe?: boolean;
+} = {}): Promise<GatewayConnectionProbeResult> {
+  const allowRpcProbe = options.allowRpcProbe !== false;
+  const probeKey = [
+    buildGatewayProbeCacheKey(params),
+    `preferLocalHealth=${options.preferLocalHealth ? '1' : '0'}`,
+    `allowRpcProbe=${allowRpcProbe ? '1' : '0'}`,
+  ].join('|');
   const now = Date.now();
   if (
     cachedGatewayProbeKey === probeKey
@@ -3715,15 +4533,18 @@ async function probeGatewayConnectionStatus(params: {
 
   const probePromise: Promise<GatewayConnectionProbeResult> = (async () => {
     const gatewayTarget = parseGatewayUrlForStatusProbe(params.gatewayUrl);
-    const isLocalLoopbackTarget = gatewayTarget ? isLoopbackHostname(gatewayTarget.hostname) : false;
+    const isLocalGatewayTarget = gatewayTarget ? isLocalGatewayHostname(gatewayTarget.hostname) : false;
     let localHealthFailureMessage: string | null = null;
+    let localHealthOk = false;
 
-    if (isLocalLoopbackTarget) {
+    if (isLocalGatewayTarget) {
       const health = await probeGatewayHealth(params.gatewayUrl);
       if (!health.ok) {
         // Older OpenClaw builds may not respond to /health reliably.
         // Fall back to a real gateway RPC probe before declaring disconnected.
         localHealthFailureMessage = health.message || 'Local OpenClaw gateway is not responding';
+      } else {
+        localHealthOk = true;
       }
 
       const credentialMatches = evaluateLocalGatewayCredentialMatch(params, gatewayTarget);
@@ -3734,6 +4555,30 @@ async function probeGatewayConnectionStatus(params: {
           source: 'local-runtime',
         };
       }
+
+      if (options?.preferLocalHealth && localHealthOk) {
+        return {
+          connected: true,
+          message: 'Local OpenClaw gateway ready',
+          source: 'local-runtime',
+        };
+      }
+
+      if (!allowRpcProbe) {
+        return {
+          connected: localHealthOk,
+          message: localHealthOk
+            ? 'Local OpenClaw gateway ready'
+            : (localHealthFailureMessage || 'Local OpenClaw gateway is not responding'),
+          source: 'local-runtime',
+        };
+      }
+    } else if (!allowRpcProbe) {
+      return {
+        connected: false,
+        message: 'Gateway HTTP health probe is only available for a local OpenClaw gateway.',
+        source: 'auth-probe',
+      };
     }
 
     const attemptGatewayReadyProbe = async (options?: {
@@ -3760,18 +4605,18 @@ async function probeGatewayConnectionStatus(params: {
         ]);
         return {
           connected: true,
-          message: isLocalLoopbackTarget
+          message: isLocalGatewayTarget
             ? (localHealthFailureMessage
               ? 'Local OpenClaw gateway ready after HTTP health probe failed'
               : 'Local OpenClaw gateway ready')
             : undefined,
-          source: isLocalLoopbackTarget ? 'local-runtime' : 'auth-probe',
+          source: isLocalGatewayTarget ? 'local-runtime' : 'auth-probe',
         };
       } catch (error: any) {
         return {
           connected: false,
           message: readCliErrorDetail(error) || error?.message || localHealthFailureMessage || 'Connection failed',
-          source: isLocalLoopbackTarget ? 'local-runtime' : 'auth-probe',
+          source: isLocalGatewayTarget ? 'local-runtime' : 'auth-probe',
         };
       } finally {
         if (timeoutId) {
@@ -3904,7 +4749,11 @@ function readBrowserConfigState(): BrowserConfigState {
 
   return {
     enabled: typeof config?.browser?.enabled === 'boolean' ? config.browser.enabled : null,
-    headless: typeof config?.browser?.headless === 'boolean' ? config.browser.headless : null,
+    headless: typeof profileConfig?.headless === 'boolean'
+      ? profileConfig.headless
+      : typeof config?.browser?.headless === 'boolean'
+        ? config.browser.headless
+        : null,
     profile,
     executablePath: normalizeCliText(config?.browser?.executablePath) || null,
     noSandbox: typeof config?.browser?.noSandbox === 'boolean' ? config.browser.noSandbox : null,
@@ -4071,6 +4920,69 @@ function buildBrowserHealthDiagnosticsFromCli(
   };
 }
 
+function parseBrowserStatusCliBoolean(value: string): boolean | null {
+  const normalized = normalizeCliText(value).toLowerCase();
+  if (normalized.startsWith('true')) return true;
+  if (normalized.startsWith('false')) return false;
+  return null;
+}
+
+function parseBrowserStatusCliText(output: string): Record<string, unknown> | null {
+  const normalizedOutput = normalizeCliText(output);
+  if (!normalizedOutput) return null;
+
+  const parsed: Record<string, unknown> = {};
+  for (const line of normalizedOutput.split(/\r?\n/)) {
+    const match = line.match(/^\s*([A-Za-z][A-Za-z0-9._-]*)\s*:\s*(.*?)\s*$/);
+    if (!match) continue;
+
+    const key = match[1];
+    const value = match[2];
+    const normalizedKey = key.toLowerCase();
+    if (normalizedKey === 'enabled' || normalizedKey === 'running' || normalizedKey === 'headless') {
+      const parsedBoolean = parseBrowserStatusCliBoolean(value);
+      if (parsedBoolean !== null) {
+        parsed[normalizedKey] = parsedBoolean;
+      }
+      continue;
+    }
+
+    if (normalizedKey === 'profile') {
+      parsed.profile = normalizeCliText(value);
+    } else if (normalizedKey === 'transport') {
+      parsed.transport = normalizeCliText(value);
+    } else if (normalizedKey === 'browser' || normalizedKey === 'chosenbrowser') {
+      parsed.chosenBrowser = normalizeCliText(value);
+    } else if (normalizedKey === 'detectedbrowser') {
+      parsed.detectedBrowser = normalizeCliText(value);
+    } else if (normalizedKey === 'detecterror') {
+      const detail = normalizeCliText(value);
+      parsed.detectError = /^(none|null|n\/a)$/i.test(detail) ? '' : detail;
+    }
+  }
+
+  return Object.keys(parsed).length > 0 ? parsed : null;
+}
+
+function parseBrowserStatusCliOutput(output: string): Record<string, unknown> | null {
+  const normalizedOutput = normalizeCliText(output);
+  if (!normalizedOutput) return null;
+
+  try {
+    return JSON.parse(normalizedOutput);
+  } catch {}
+
+  const jsonStart = normalizedOutput.indexOf('{');
+  const jsonEnd = normalizedOutput.lastIndexOf('}');
+  if (jsonStart >= 0 && jsonEnd > jsonStart) {
+    try {
+      return JSON.parse(normalizedOutput.slice(jsonStart, jsonEnd + 1));
+    } catch {}
+  }
+
+  return parseBrowserStatusCliText(normalizedOutput);
+}
+
 function patchExecApprovals(enabled: boolean) {
   const execApprovalsPath = getExecApprovalsPath();
   if (!fs.existsSync(execApprovalsPath)) {
@@ -4229,6 +5141,46 @@ async function runOpenClawBrowserCommand(args: string[], timeoutMs: number) {
   });
 }
 
+async function refreshOpenClawPluginRegistryForBrowserSelfHeal() {
+  const executablePath = await ensureResolvedOpenClawExecutablePath();
+  await execFilePromise(executablePath, ['plugins', 'registry', '--refresh'], {
+    timeout: BROWSER_SELF_HEAL_PLUGIN_REGISTRY_REFRESH_TIMEOUT_MS,
+    maxBuffer: 1024 * 1024,
+  });
+}
+
+async function waitForBrowserGatewayReady(
+  timeoutMs: number,
+  reportProgress?: BrowserTaskProgressReporter,
+) {
+  const deadline = Date.now() + timeoutMs;
+  let lastFailure = 'OpenClaw gateway is not ready for browser control yet.';
+
+  while (Date.now() < deadline) {
+    reportProgress?.('wait-gateway', lastFailure);
+    const probe = await probeGatewayConnectionStatus(buildGatewayStatusProbeParams(), {
+      preferLocalHealth: true,
+      allowRpcProbe: false,
+    });
+
+    if (probe.connected) {
+      reportProgress?.('wait-gateway');
+      return;
+    }
+
+    lastFailure = probe.message || lastFailure;
+    await sleep(BROWSER_HEALTH_GATEWAY_READY_POLL_INTERVAL_MS);
+  }
+
+  const error = new Error(lastFailure || 'Timed out waiting for OpenClaw gateway before browser control.');
+  (error as Error & { browserGatewayNotReady?: boolean }).browserGatewayNotReady = true;
+  throw error;
+}
+
+function isBrowserGatewayNotReadyError(error: unknown): boolean {
+  return !!(error as { browserGatewayNotReady?: boolean } | null)?.browserGatewayNotReady;
+}
+
 function buildBrowserProfileArgs(browserConfig: BrowserConfigState, args: string[]) {
   return ['--browser-profile', browserConfig.profile || BROWSER_HEALTH_PROFILE, ...args];
 }
@@ -4313,6 +5265,7 @@ async function runBrowserRuntimeReadinessCheck(reportProgress?: BrowserTaskProgr
   const checkedAt = Date.now();
   const browserConfig = readBrowserConfigState();
   const configError = readConfiguredBrowserValidationError(browserConfig);
+  let diagnostics = buildFallbackBrowserHealthDiagnostics(checkedAt);
 
   if (configError && browserConfig.enabled === false) {
     return {
@@ -4332,18 +5285,20 @@ async function runBrowserRuntimeReadinessCheck(reportProgress?: BrowserTaskProgr
     };
   }
 
-  reportProgress?.('read-status');
-  let diagnostics = await readBrowserHealthDiagnostics(browserConfig, checkedAt);
-  if (diagnostics.running === true && !diagnostics.detectError) {
-    return {
-      ready: true,
-      terminalFailure: false,
-      diagnostics,
-      detail: null,
-    };
-  }
-
   try {
+    await waitForBrowserGatewayReady(BROWSER_HEALTH_GATEWAY_READY_TIMEOUT_MS, reportProgress);
+
+    reportProgress?.('read-status');
+    diagnostics = await readBrowserHealthDiagnostics(browserConfig, checkedAt);
+    if (diagnostics.running === true && !diagnostics.detectError) {
+      return {
+        ready: true,
+        terminalFailure: false,
+        diagnostics,
+        detail: null,
+      };
+    }
+
     reportProgress?.('start-browser');
     await runOpenClawBrowserCommand(
       buildBrowserProfileArgs(browserConfig, ['--timeout', String(BROWSER_HEALTH_START_TIMEOUT_MS), 'start']),
@@ -4369,7 +5324,9 @@ async function runBrowserRuntimeReadinessCheck(reportProgress?: BrowserTaskProgr
     };
   } catch (error: any) {
     const detail = readCliErrorDetail(error) || error?.message || 'Browser health check failed';
-    diagnostics = await readBrowserHealthDiagnostics(browserConfig, checkedAt, detail);
+    diagnostics = isBrowserGatewayNotReadyError(error)
+      ? buildFallbackBrowserHealthDiagnostics(checkedAt, detail)
+      : await readBrowserHealthDiagnostics(browserConfig, checkedAt, detail);
     return {
       ready: false,
       terminalFailure: false,
@@ -4452,18 +5409,22 @@ async function readBrowserHealthDiagnostics(
   rawDetail?: string | null
 ): Promise<BrowserHealthDiagnostics> {
   try {
-    const { stdout } = await runOpenClawBrowserCommand(
+    const { stdout, stderr } = await runOpenClawBrowserCommand(
       buildBrowserProfileArgs(browserConfig, ['--json', '--timeout', String(BROWSER_HEALTH_CLI_TIMEOUT_MS), 'status']),
       BROWSER_HEALTH_EXEC_TIMEOUT_MS
     );
-    const parsed = JSON.parse(normalizeCliText(stdout) || '{}');
-    return buildBrowserHealthDiagnosticsFromCli(parsed, checkedAt, browserConfig, rawDetail);
+    const parsed = parseBrowserStatusCliOutput(stdout) || parseBrowserStatusCliOutput(stderr);
+    if (parsed) {
+      return buildBrowserHealthDiagnosticsFromCli(parsed, checkedAt, browserConfig, rawDetail);
+    }
+    return buildFallbackBrowserHealthDiagnostics(checkedAt, rawDetail || 'Unable to parse OpenClaw browser status output');
   } catch (error: any) {
-    const stdout = normalizeCliText(error?.stdout);
-    if (stdout) {
-      try {
-        return buildBrowserHealthDiagnosticsFromCli(JSON.parse(stdout), checkedAt, browserConfig, rawDetail || readCliErrorDetail(error));
-      } catch {}
+    const output = normalizeCliText(error?.stdout) || normalizeCliText(error?.stderr);
+    if (output) {
+      const parsed = parseBrowserStatusCliOutput(output);
+      if (parsed) {
+        return buildBrowserHealthDiagnosticsFromCli(parsed, checkedAt, browserConfig, rawDetail || readCliErrorDetail(error));
+      }
     }
 
     return buildFallbackBrowserHealthDiagnostics(checkedAt, rawDetail || readCliErrorDetail(error));
@@ -4539,10 +5500,14 @@ async function runBrowserHealthCheck(reportProgress?: BrowserTaskProgressReporte
     });
   }
 
-  reportProgress?.('read-status');
-  let diagnostics = await readBrowserHealthDiagnostics(browserConfig, checkedAt);
+  let diagnostics = buildFallbackBrowserHealthDiagnostics(checkedAt);
 
   try {
+    await waitForBrowserGatewayReady(BROWSER_HEALTH_GATEWAY_READY_TIMEOUT_MS, reportProgress);
+
+    reportProgress?.('read-status');
+    diagnostics = await readBrowserHealthDiagnostics(browserConfig, checkedAt);
+
     reportProgress?.('start-browser');
     await runOpenClawBrowserCommand(
       buildBrowserProfileArgs(browserConfig, ['--timeout', String(BROWSER_HEALTH_START_TIMEOUT_MS), 'start']),
@@ -4584,7 +5549,9 @@ async function runBrowserHealthCheck(reportProgress?: BrowserTaskProgressReporte
   } catch (error: any) {
     const detail = readCliErrorDetail(error) || error?.message || 'Browser health check failed';
     reportProgress?.('finalize', detail);
-    diagnostics = await readBrowserHealthDiagnostics(browserConfig, checkedAt, detail);
+    diagnostics = isBrowserGatewayNotReadyError(error)
+      ? buildFallbackBrowserHealthDiagnostics(checkedAt, detail)
+      : await readBrowserHealthDiagnostics(browserConfig, checkedAt, detail);
 
     return finalizeBrowserHealthSnapshot({
       ...diagnostics,
@@ -4739,11 +5706,20 @@ function buildGatewayStatusProbeParams() {
   const appConfig = configManager.getConfig();
   const localGatewayConfig = readLocalGatewayRuntimeConfig();
   const localPort = localGatewayConfig?.port ?? 18789;
+  const localGatewayUrl = `ws://127.0.0.1:${localPort}`;
+  const configuredGatewayUrl = normalizeCliText(appConfig.gatewayUrl);
+  const gatewayTarget = parseGatewayUrlForStatusProbe(configuredGatewayUrl || localGatewayUrl);
+  const shouldUseLocalRuntimeConfig = !!localGatewayConfig
+    && (!configuredGatewayUrl || (gatewayTarget ? isLocalGatewayHostname(gatewayTarget.hostname) : false));
 
   return {
-    gatewayUrl: normalizeCliText(appConfig.gatewayUrl) || `ws://127.0.0.1:${localPort}`,
-    token: normalizeCliText(appConfig.token) || localGatewayConfig?.token || undefined,
-    password: normalizeCliText(appConfig.password) || localGatewayConfig?.password || undefined,
+    gatewayUrl: shouldUseLocalRuntimeConfig ? localGatewayUrl : configuredGatewayUrl,
+    token: shouldUseLocalRuntimeConfig
+      ? (localGatewayConfig.token || undefined)
+      : (normalizeCliText(appConfig.token) || localGatewayConfig?.token || undefined),
+    password: shouldUseLocalRuntimeConfig
+      ? (localGatewayConfig.password || undefined)
+      : (normalizeCliText(appConfig.password) || localGatewayConfig?.password || undefined),
   };
 }
 
@@ -4756,8 +5732,27 @@ function isGatewayRuntimeStateKnown(runtimeState: OpenClawGatewayServiceRuntimeS
     || runtimeState.stateChangeTimestampMonotonic !== null;
 }
 
-async function waitForGatewayRestartAfterBrowserModeChange(previousRuntimeState: OpenClawGatewayServiceRuntimeState) {
+async function probeGatewayRestartReadinessStatus() {
+  return probeGatewayConnectionStatus(buildGatewayStatusProbeParams(), {
+    preferLocalHealth: true,
+    allowRpcProbe: false,
+  });
+}
+
+function getGatewayRestartStableWindowMs(trigger: GatewayRestartTrigger | null) {
+  return trigger === 'gateway'
+    ? OPENCLAW_GATEWAY_MANUAL_RESTART_STABLE_WINDOW_MS
+    : OPENCLAW_GATEWAY_RESTART_STABLE_WINDOW_MS;
+}
+
+async function waitForGatewayRestartAfterBrowserModeChange(
+  previousRuntimeState: OpenClawGatewayServiceRuntimeState,
+  options?: {
+    stableWindowMs?: number;
+  },
+) {
   const deadline = Date.now() + BROWSER_HEADED_MODE_RESTART_TIMEOUT_MS;
+  const stableWindowMs = Math.max(0, options?.stableWindowMs ?? OPENCLAW_GATEWAY_RESTART_STABLE_WINDOW_MS);
   let restartObserved = false;
   let lastFailure = 'OpenClaw restart in progress';
 
@@ -4780,7 +5775,7 @@ async function waitForGatewayRestartAfterBrowserModeChange(previousRuntimeState:
       throw new Error('OpenClaw gateway service failed to restart.');
     }
 
-    const probe = await probeGatewayConnectionStatus(buildGatewayStatusProbeParams());
+    const probe = await probeGatewayRestartReadinessStatus();
     const runtimeReady = !runtimeStateKnown || runtimeStateRunning;
 
     if (!probe.connected || !runtimeReady) {
@@ -4790,7 +5785,7 @@ async function waitForGatewayRestartAfterBrowserModeChange(previousRuntimeState:
         : 'OpenClaw gateway service is still starting.');
     } else if (restartObserved) {
       await waitForGatewayConnectionStable(Math.max(0, deadline - Date.now()), {
-        minimumStableWindowMs: OPENCLAW_GATEWAY_RESTART_STABLE_WINDOW_MS,
+        minimumStableWindowMs: stableWindowMs,
         probeIntervalMs: BROWSER_HEADED_MODE_RESTART_POLL_INTERVAL_MS,
       });
       return;
@@ -4822,7 +5817,7 @@ async function waitForGatewayConnectionStable(
   let stableSinceMs: number | null = null;
 
   while (Date.now() < deadline) {
-    const probe = await probeGatewayConnectionStatus(buildGatewayStatusProbeParams());
+    const probe = await probeGatewayRestartReadinessStatus();
     if (probe.connected) {
       const now = Date.now();
       if (stableSinceMs === null) {
@@ -4852,12 +5847,12 @@ async function reconcileGatewayRestartSnapshot() {
   }
 
   try {
-    const probe = await probeGatewayConnectionStatus(buildGatewayStatusProbeParams());
+    const probe = await probeGatewayRestartReadinessStatus();
     if (probe.connected) {
       const now = Date.now();
       if (gatewayRestartReconcileStableSinceMs === null) {
         gatewayRestartReconcileStableSinceMs = now;
-      } else if ((now - gatewayRestartReconcileStableSinceMs) >= OPENCLAW_GATEWAY_RESTART_STABLE_WINDOW_MS) {
+      } else if ((now - gatewayRestartReconcileStableSinceMs) >= getGatewayRestartStableWindowMs(gatewayRestartSnapshot.trigger)) {
         resetGatewayRestartSnapshot();
       }
     } else {
@@ -4892,7 +5887,9 @@ function runTrackedGatewayRestart(options: {
   activeGatewayRestartTask = (async () => {
     try {
       await restartGatewayService();
-      await waitForGatewayRestartAfterBrowserModeChange(options.previousRuntimeState);
+      await waitForGatewayRestartAfterBrowserModeChange(options.previousRuntimeState, {
+        stableWindowMs: getGatewayRestartStableWindowMs(options.trigger),
+      });
       resetGatewayRestartSnapshot();
     } catch (error) {
       patchGatewayRestartSnapshot({
@@ -5239,7 +6236,10 @@ async function restartClawUiService() {
 
 function createStructuredChatError(rawDetail?: string | null, forcedCode?: string) {
   const detail = typeof rawDetail === 'string' && rawDetail.trim() ? rawDetail.trim() : 'Unknown error';
-  const messageCode = forcedCode || (detail === CHAT_GATEWAY_DISCONNECTED_DETAIL ? CHAT_GATEWAY_DISCONNECTED_CODE : CHAT_RUN_ERROR_CODE);
+  const messageCode = forcedCode
+    || (detail === CHAT_GATEWAY_DISCONNECTED_DETAIL
+      ? CHAT_GATEWAY_DISCONNECTED_CODE
+      : CHAT_RUN_ERROR_CODE);
 
   return {
     content: `${CHAT_RUN_ERROR_PREFIX}${detail}`,
@@ -5287,7 +6287,9 @@ function getStructuredChatMessage(content?: string | null) {
   if (!detail) return {};
 
   return {
-    messageCode: detail === CHAT_GATEWAY_DISCONNECTED_DETAIL ? CHAT_GATEWAY_DISCONNECTED_CODE : CHAT_RUN_ERROR_CODE,
+    messageCode: detail === CHAT_GATEWAY_DISCONNECTED_DETAIL
+      ? CHAT_GATEWAY_DISCONNECTED_CODE
+      : CHAT_RUN_ERROR_CODE,
     messageParams: undefined as StructuredMessageParams | undefined,
     rawDetail: detail,
     role: 'system' as const,
@@ -5336,17 +6338,21 @@ function withStructuredGroupMessage<T extends {
   };
 }
 
-function withStructuredChatMessage<T extends { content?: string | null; role?: 'user' | 'assistant' | 'system'; messageCode?: string; messageParams?: StructuredMessageParams | null; rawDetail?: string | null; agent_id?: string | null; agent_name?: string | null }>(
+function withStructuredChatMessage<T extends { content?: string | null; process_content?: string | null; role?: 'user' | 'assistant' | 'system'; messageCode?: string; messageParams?: StructuredMessageParams | null; rawDetail?: string | null; agent_id?: string | null; agent_name?: string | null }>(
   message: T,
   options?: { sessionId?: string | null }
-): T & { role?: 'user' | 'assistant' | 'system'; messageCode?: string; messageParams?: StructuredMessageParams; rawDetail?: string | null; agent_id?: string | null; agent_name?: string | null } {
+): T & { process_content?: string | null; role?: 'user' | 'assistant' | 'system'; messageCode?: string; messageParams?: StructuredMessageParams; rawDetail?: string | null; agent_id?: string | null; agent_name?: string | null } {
   const content = typeof message.content === 'string'
     ? rewriteOpenClawMediaPaths(message.content, options?.sessionId ? getSessionWorkspacePath(options.sessionId) : undefined)
     : message.content;
+  const processContent = typeof message.process_content === 'string'
+    ? rewriteOpenClawMediaPaths(message.process_content, options?.sessionId ? getSessionWorkspacePath(options.sessionId) : undefined)
+    : message.process_content;
   const structured = getStructuredChatMessage(content);
   return {
     ...message,
     content,
+    process_content: processContent,
     role: structured.role ?? message.role,
     messageCode: message.messageCode ?? structured.messageCode,
     messageParams: message.messageParams ?? structured.messageParams,
@@ -5436,6 +6442,22 @@ if (mainRegistered) {
 
 const connections = new Map<string, OpenClawClient>();
 
+function getActiveGatewayConnectionStatus(): GatewayConnectionProbeResult | null {
+  const activeConnectionCount = Array.from(connections.values())
+    .filter((client) => client.isConnected())
+    .length;
+
+  if (activeConnectionCount === 0) {
+    return null;
+  }
+
+  return {
+    connected: true,
+    message: `OpenClaw gateway has ${activeConnectionCount} active session connection${activeConnectionCount === 1 ? '' : 's'}`,
+    source: 'active-session',
+  };
+}
+
 for (const group of db.getGroupChats()) {
   try {
     cleanupLegacyGroupRuntimeArtifacts(group.id);
@@ -5487,12 +6509,14 @@ app.use((req, res, next) => {
 // transcripts for referenced audio uploads when this host has a usable audio transcription provider.
 async function prepareOutgoingMessage(
   message: string,
-  agentId: string
+  agentId: string,
+  options: { includeDocumentToolingContext?: boolean } = {},
 ): Promise<{ text: string; attachments: { type: string; mimeType: string; content: string }[] }> {
   const workspacePath = agentProvisioner.getWorkspacePath(agentId);
   const absoluteUploadsDir = path.join(workspacePath, 'uploads');
   const rewritten = rewriteMessageWithWorkspaceUploads(message, absoluteUploadsDir, { extractImageAttachments: true });
-  if (readMaxPermissionsEnabled() === true && hasDocumentUploads(rewritten.linkedUploads)) {
+  const includeDocumentToolingContext = options.includeDocumentToolingContext !== false;
+  if (includeDocumentToolingContext && readMaxPermissionsEnabled() === true && hasDocumentUploads(rewritten.linkedUploads)) {
     try {
       await ensureManagedDocumentToolingReady();
     } catch (error) {
@@ -5500,7 +6524,7 @@ async function prepareOutgoingMessage(
     }
   }
   const imageInspectionContext = buildImageUploadInspectionContext(rewritten.linkedUploads);
-  const documentToolingContext = buildDocumentToolingContext(rewritten.linkedUploads);
+  const documentToolingContext = includeDocumentToolingContext ? buildDocumentToolingContext(rewritten.linkedUploads) : '';
   const transcripts = await prepareAudioTranscriptsFromUploads(rewritten.linkedUploads, agentId);
   const audioTranscriptContext = buildAudioTranscriptContext(transcripts);
 
@@ -5508,6 +6532,307 @@ async function prepareOutgoingMessage(
     text: [rewritten.text, imageInspectionContext, documentToolingContext, audioTranscriptContext].filter(Boolean).join('\n\n').trim(),
     attachments: rewritten.attachments,
   };
+}
+
+function readEffectiveAgentRuntimeSettings(sessionInfo: SessionRow | undefined, agentId: string): {
+  runtimeMode: AgentRuntimeMode;
+  systemPromptMode: AgentSystemPromptMode;
+  toolMode: AgentToolMode;
+} {
+  const openClawRuntime = agentProvisioner.readAgentRuntimeConfig(agentId);
+  return {
+    runtimeMode: normalizeAgentRuntimeMode(sessionInfo?.runtime_mode),
+    systemPromptMode: openClawRuntime.systemPromptMode,
+    toolMode: openClawRuntime.toolMode,
+  };
+}
+
+function shouldInjectHostTakeoverInstruction(sessionInfo: SessionRow | undefined, agentId: string): boolean {
+  if (readMaxPermissionsEnabled() !== true) return false;
+  const runtimeSettings = readEffectiveAgentRuntimeSettings(sessionInfo, agentId);
+  if (runtimeSettings.runtimeMode === 'direct') return false;
+  return runtimeSettings.toolMode === 'full' || runtimeSettings.toolMode === 'coding';
+}
+
+function buildDirectChatRequestUrl(endpoint: ImageGenerationEndpointModelSnapshot): string {
+  return `${endpoint.baseUrl.replace(/\/+$/, '')}/chat/completions`;
+}
+
+function buildDirectModelRequestHeaders(endpoint: ImageGenerationEndpointModelSnapshot): Record<string, string> {
+  const headers: Record<string, string> = {
+    ...(endpoint.headers || {}),
+    'Content-Type': 'application/json',
+  };
+
+  const authHeader = endpoint.authHeader || 'Authorization';
+  if (!hasHeader(headers, authHeader)) {
+    headers[authHeader] = authHeader.toLowerCase() === 'authorization'
+      ? `Bearer ${endpoint.apiKey}`
+      : endpoint.apiKey;
+  }
+
+  return headers;
+}
+
+function sanitizeDirectModelErrorDetail(detail: string, endpoint?: ImageGenerationEndpointModelSnapshot): string {
+  const normalized = normalizeCliText(detail);
+  if (!normalized) return 'Direct model request failed.';
+
+  let sanitized = normalized;
+  const secret = endpoint?.apiKey;
+  if (secret && secret.length >= 6) {
+    sanitized = sanitized.split(secret).join('[redacted]');
+  }
+
+  return sanitized.length > 2000 ? `${sanitized.slice(0, 2000)}...` : sanitized;
+}
+
+async function readDirectModelErrorDetail(response: Response, endpoint: ImageGenerationEndpointModelSnapshot): Promise<string> {
+  const bodyText = await response.text().catch(() => '');
+  let bodyDetail = bodyText.trim();
+  try {
+    const parsed = JSON.parse(bodyText);
+    bodyDetail = normalizeCliText(parsed?.error?.message)
+      || normalizeCliText(parsed?.message)
+      || normalizeCliText(parsed?.detail)
+      || normalizeCliText(parsed?.error)
+      || bodyDetail;
+  } catch {}
+
+  return sanitizeDirectModelErrorDetail(
+    `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ''}${bodyDetail ? ` - ${bodyDetail}` : ''}`,
+    endpoint,
+  );
+}
+
+function normalizeDirectModelText(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) {
+    return value
+      .map((part) => {
+        if (typeof part === 'string') return part;
+        if (typeof part?.text === 'string') return part.text;
+        if (typeof part?.content === 'string') return part.content;
+        return '';
+      })
+      .filter(Boolean)
+      .join('');
+  }
+  if (typeof (value as any)?.text === 'string') return (value as any).text;
+  if (typeof (value as any)?.content === 'string') return (value as any).content;
+  return '';
+}
+
+function extractDirectModelDeltaText(payload: any): string {
+  const choice = Array.isArray(payload?.choices) ? payload.choices[0] : null;
+  return normalizeDirectModelText(choice?.delta?.content)
+    || normalizeDirectModelText(choice?.message?.content)
+    || normalizeDirectModelText(payload?.delta?.content)
+    || normalizeDirectModelText(payload?.content);
+}
+
+function buildDirectChatMessages(params: {
+  sessionId: string;
+  agentId: string;
+  userMessageId: number;
+  assistantMessageId: number;
+  currentUserText: string;
+  attachments: { type: string; mimeType: string; content: string }[];
+}): Array<{ role: 'system' | 'user' | 'assistant'; content: any }> {
+  const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: any }> = [];
+  const systemPrompt = agentProvisioner.buildAgentSystemPromptOverride(params.agentId).trim();
+  if (systemPrompt) {
+    messages.push({ role: 'system', content: systemPrompt });
+  }
+
+  const history = db.getMessages(params.sessionId, 40);
+  for (const row of history) {
+    if (row.id === params.assistantMessageId) continue;
+    if (row.role !== 'user' && row.role !== 'assistant') continue;
+
+    let content = row.id === params.userMessageId ? params.currentUserText : row.content;
+    content = normalizeCliText(content);
+    if (!content) continue;
+
+    if (row.role === 'user' && row.id === params.userMessageId && params.attachments.length > 0) {
+      messages.push({
+        role: 'user',
+        content: [
+          { type: 'text', text: content },
+          ...params.attachments
+            .filter((attachment) => attachment.type === 'image' && attachment.content)
+            .map((attachment) => ({
+              type: 'image_url',
+              image_url: {
+                url: `data:${attachment.mimeType || 'image/png'};base64,${attachment.content}`,
+              },
+            })),
+        ],
+      });
+      continue;
+    }
+
+    messages.push({ role: row.role, content });
+  }
+
+  return messages;
+}
+
+async function runDirectChatCompletion(params: {
+  sessionId: string;
+  agentId: string;
+  userMessageId: number;
+  assistantMessageId: number;
+  message: string;
+  modelUsed: string;
+  response: ExpressResponse;
+  processStartTag?: string;
+  processEndTag?: string;
+  sessionInterruptionEpoch: number;
+}): Promise<void> {
+  const endpoint = agentProvisioner.readEndpointModel(params.modelUsed);
+  if (!endpoint) {
+    throw new Error(`Direct runtime model is not configured: ${params.modelUsed}`);
+  }
+  if (!endpoint.api.toLowerCase().includes('openai')) {
+    throw new Error(`Direct runtime currently supports OpenAI-compatible chat endpoints only: ${endpoint.api}`);
+  }
+
+  const outgoingMessage = await prepareOutgoingMessage(params.message, params.agentId, {
+    includeDocumentToolingContext: false,
+  });
+  const messages = buildDirectChatMessages({
+    sessionId: params.sessionId,
+    agentId: params.agentId,
+    userMessageId: params.userMessageId,
+    assistantMessageId: params.assistantMessageId,
+    currentUserText: outgoingMessage.text,
+    attachments: outgoingMessage.attachments,
+  });
+  if (messages.length === 0) {
+    throw new Error('Direct runtime has no message content to send.');
+  }
+
+  const controller = new AbortController();
+  let rawText = '';
+  let lastVisibleText = '';
+  let lastVisibleProcessContent = '';
+  let lastVisibleProcessStreaming = false;
+
+  const emitSnapshot = (type: 'delta' | 'final') => {
+    const split = splitChatProcessOutput(rawText, params.processStartTag, params.processEndTag);
+    const visibleText = rewriteOpenClawMediaPaths(split.finalContent, getSessionWorkspacePath(params.sessionId));
+    const visibleProcessContent = rewriteOpenClawMediaPaths(split.processContent, getSessionWorkspacePath(params.sessionId));
+    const visibleProcessStreaming = type === 'final' ? false : split.processStreaming;
+    const changed = visibleText !== lastVisibleText
+      || visibleProcessContent !== lastVisibleProcessContent
+      || visibleProcessStreaming !== lastVisibleProcessStreaming;
+
+    if (type === 'delta' && !changed) return;
+
+    lastVisibleText = visibleText;
+    lastVisibleProcessContent = visibleProcessContent;
+    lastVisibleProcessStreaming = visibleProcessStreaming;
+    db.updateMessage(params.assistantMessageId, visibleText, params.modelUsed, visibleProcessContent);
+    params.response.write(`data: ${JSON.stringify({
+      type,
+      text: visibleText,
+      process_content: visibleProcessContent,
+      process_streaming: visibleProcessStreaming,
+      modelUsed: params.modelUsed,
+      model_used: params.modelUsed,
+    })}\n\n`);
+  };
+
+  try {
+    assertSessionInterruptionEpoch(params.sessionId, params.sessionInterruptionEpoch);
+    const response = await fetch(buildDirectChatRequestUrl(endpoint), {
+      method: 'POST',
+      headers: buildDirectModelRequestHeaders(endpoint),
+      body: JSON.stringify({
+        model: endpoint.modelName,
+        messages,
+        stream: true,
+      }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(await readDirectModelErrorDetail(response, endpoint));
+    }
+
+    if (!response.body) {
+      const payload = await response.json().catch(() => null) as any;
+      rawText = normalizeDirectModelText(payload?.choices?.[0]?.message?.content);
+      if (!rawText.trim()) {
+        throw new Error('Direct runtime returned an empty response.');
+      }
+      emitSnapshot('final');
+      params.response.end();
+      return;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      assertSessionInterruptionEpoch(params.sessionId, params.sessionInterruptionEpoch);
+      const { value, done } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      let boundary = buffer.indexOf('\n\n');
+      while (boundary >= 0) {
+        const eventBlock = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+
+        for (const line of eventBlock.split('\n')) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith('data:')) continue;
+          const data = trimmed.slice(5).trim();
+          if (!data) continue;
+          if (data === '[DONE]') continue;
+
+          try {
+            const parsed = JSON.parse(data);
+            const delta = extractDirectModelDeltaText(parsed);
+            if (delta) {
+              rawText += delta;
+              emitSnapshot('delta');
+            }
+          } catch {}
+        }
+
+        boundary = buffer.indexOf('\n\n');
+      }
+    }
+
+    if (buffer.trim()) {
+      for (const line of buffer.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data:')) continue;
+        const data = trimmed.slice(5).trim();
+        if (!data || data === '[DONE]') continue;
+        try {
+          const parsed = JSON.parse(data);
+          const delta = extractDirectModelDeltaText(parsed);
+          if (delta) rawText += delta;
+        } catch {}
+      }
+    }
+
+    if (!rawText.trim()) {
+      throw new Error('Direct runtime returned an empty response.');
+    }
+
+    assertSessionInterruptionEpoch(params.sessionId, params.sessionInterruptionEpoch);
+    emitSnapshot('final');
+    params.response.end();
+  } catch (error) {
+    controller.abort();
+    throw error;
+  }
 }
 
 const AGENT_WORKSPACE_RESET_PRESERVED_ROOT_ENTRIES = new Set([
@@ -5686,6 +7011,140 @@ function getSessionWorkspacePath(sessionId: string): string {
   const sessionInfo = sessionManager.getSession(sessionId);
   const agentId = sessionInfo?.agentId || 'main';
   return agentProvisioner.getWorkspacePath(agentId);
+}
+
+function readAgentBootstrapIntentContext(agentId: string): string {
+  return readAgentBootstrapContextFromWorkspace(agentProvisioner.getWorkspacePath(agentId));
+}
+
+function buildOpenClawChatSessionKey(sessionId: string, agentId: string): string {
+  return sessionId.startsWith('agent:') ? sessionId : `agent:${agentId}:chat:${sessionId}`;
+}
+
+function cleanupChatProcessText(value: string): string {
+  return value
+    .replace(/\r\n?/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function findTrailingIncompleteChatProcessTagFragment(content: string, tag?: string): string {
+  const normalizedTag = tag?.trim() || '';
+  if (!content || !normalizedTag || content.endsWith(normalizedTag)) {
+    return '';
+  }
+
+  const minFragmentLength = Math.min(3, Math.max(1, normalizedTag.length - 1));
+  const maxFragmentLength = Math.min(content.length, normalizedTag.length - 1);
+
+  for (let length = maxFragmentLength; length >= minFragmentLength; length -= 1) {
+    const fragment = normalizedTag.slice(0, length);
+    if (content.endsWith(fragment)) {
+      return fragment;
+    }
+  }
+
+  return '';
+}
+
+function stripChatProcessTagArtifacts(
+  content: string,
+  processStartTag?: string,
+  processEndTag?: string,
+): string {
+  if (!content) return content;
+
+  const tags = [processStartTag?.trim(), processEndTag?.trim()]
+    .filter((tag): tag is string => Boolean(tag));
+  let cleanedContent = content.replace(/\r\n?/g, '\n');
+
+  for (const tag of tags) {
+    cleanedContent = cleanedContent.replace(new RegExp(escapeRegExpForPattern(tag), 'g'), '');
+  }
+
+  cleanedContent = cleanedContent
+    .split('\n')
+    .map((line) => {
+      let nextLine = line;
+
+      while (true) {
+        const startFragment = findTrailingIncompleteChatProcessTagFragment(nextLine, processStartTag);
+        const endFragment = findTrailingIncompleteChatProcessTagFragment(nextLine, processEndTag);
+        const fragment = startFragment.length >= endFragment.length ? startFragment : endFragment;
+
+        if (!fragment) {
+          return nextLine;
+        }
+
+        nextLine = nextLine
+          .slice(0, nextLine.length - fragment.length)
+          .replace(/[ \t]+$/g, '');
+      }
+    })
+    .join('\n');
+
+  return cleanupChatProcessText(cleanedContent);
+}
+
+function splitChatProcessOutput(
+  content: string,
+  processStartTag?: string,
+  processEndTag?: string,
+): SplitChatProcessOutputResult {
+  const normalizedContent = content.replace(/\r\n?/g, '\n');
+  const startTag = processStartTag?.trim();
+  const endTag = processEndTag?.trim();
+
+  if (!normalizedContent || !startTag || !endTag) {
+    return {
+      finalContent: stripChatProcessTagArtifacts(cleanupChatProcessText(normalizedContent), processStartTag, processEndTag),
+      processContent: '',
+      processStreaming: false,
+    };
+  }
+
+  const startPattern = escapeRegExpForPattern(startTag);
+  const endPattern = escapeRegExpForPattern(endTag);
+  const processRegex = new RegExp(`${startPattern}([\\s\\S]*?)(?:${endPattern}|$)`, 'g');
+  const processBlocks: string[] = [];
+  let processStreaming = false;
+  let match: RegExpExecArray | null;
+
+  while ((match = processRegex.exec(normalizedContent)) !== null) {
+    processBlocks.push(match[1] || '');
+    if (!match[0].endsWith(endTag)) {
+      processStreaming = true;
+    }
+  }
+
+  if (processBlocks.length === 0) {
+    return {
+      finalContent: stripChatProcessTagArtifacts(cleanupChatProcessText(normalizedContent), processStartTag, processEndTag),
+      processContent: '',
+      processStreaming: false,
+    };
+  }
+
+  const processContent = stripChatProcessTagArtifacts(
+    cleanupChatProcessText(processBlocks.join('\n\n')),
+    processStartTag,
+    processEndTag,
+  );
+  const finalContent = stripChatProcessTagArtifacts(
+    cleanupChatProcessText(
+      normalizedContent
+        .replace(processRegex, '\n\n')
+        .replace(new RegExp(`(?:${startPattern}|${endPattern})`, 'g'), '\n\n'),
+    ),
+    processStartTag,
+    processEndTag,
+  );
+
+  return {
+    finalContent,
+    processContent,
+    processStreaming,
+  };
 }
 
 function rewriteOpenClawMediaPaths(text: string, workspacePath?: string): string {
@@ -6261,11 +7720,13 @@ async function prepareGroupRuntimeAgent(groupId: string, sourceAgentId: string):
   workspacePath: string;
   uploadsPath: string;
   outputPath: string;
+  bootstrapContext: string;
 }> {
   const { workspacePath, uploadsPath, outputPath } = ensureGroupWorkspace(groupId);
   const runtimeAgentId = getGroupRuntimeAgentId(groupId, sourceAgentId);
   const runtimeWorkspacePath = agentProvisioner.getWorkspacePath(sourceAgentId);
   const sourceModelConfig = agentProvisioner.readAgentModelConfig(sourceAgentId);
+  const sourceRuntimeConfig = agentProvisioner.readAgentRuntimeConfig(sourceAgentId);
 
   cleanupLegacyGroupRuntimeArtifacts(groupId);
   removeGroupWorkspaceBootstrapFiles(groupId);
@@ -6286,6 +7747,8 @@ async function prepareGroupRuntimeAgent(groupId: string, sourceAgentId: string):
     model: sourceModelConfig.modelOverride || undefined,
     fallbackMode: sourceModelConfig.fallbackMode,
     fallbacks: sourceModelConfig.fallbacks,
+    systemPromptMode: sourceRuntimeConfig.systemPromptMode,
+    toolMode: sourceRuntimeConfig.toolMode,
   });
 
   return {
@@ -6293,13 +7756,19 @@ async function prepareGroupRuntimeAgent(groupId: string, sourceAgentId: string):
     workspacePath,
     uploadsPath,
     outputPath,
+    bootstrapContext: readAgentBootstrapContextFromWorkspace(runtimeWorkspacePath),
   };
 }
 
 // Helper to get or create connection
 async function getConnection(sessionId: string): Promise<OpenClawClient> {
-  if (connections.has(sessionId)) {
-    return connections.get(sessionId)!;
+  const cachedClient = connections.get(sessionId);
+  if (cachedClient) {
+    if (cachedClient.isConnected()) {
+      return cachedClient;
+    }
+    connections.delete(sessionId);
+    cachedClient.disconnect();
   }
 
   const config = configManager.getConfig();
@@ -6312,7 +7781,13 @@ async function getConnection(sessionId: string): Promise<OpenClawClient> {
     console.error(`[OpenClawClient Error for session ${sessionId}]`, err.message);
   });
 
-  await client.connect();
+  try {
+    await client.connect();
+  } catch (error) {
+    connections.delete(sessionId);
+    client.disconnect();
+    throw error;
+  }
   connections.set(sessionId, client);
 
   client.on('disconnected', () => {
@@ -6614,7 +8089,16 @@ app.post('/api/auth/login', (req, res) => {
 
 app.get('/api/gateway/status', async (_req, res) => {
   try {
-    const result = await probeGatewayConnectionStatus(buildGatewayStatusProbeParams());
+    const activeConnectionStatus = getActiveGatewayConnectionStatus();
+    if (activeConnectionStatus) {
+      return res.json({
+        connected: activeConnectionStatus.connected,
+        message: activeConnectionStatus.message,
+        source: activeConnectionStatus.source,
+      });
+    }
+
+    const result = await probeGatewayConnectionStatus(buildGatewayStatusProbeParams(), { preferLocalHealth: true });
     res.json({
       connected: result.connected,
       message: result.message,
@@ -6847,8 +8331,15 @@ app.post('/api/config/browser-health/self-heal', async (_req, res) => {
     await configureMaxPermissionsState(true);
     reportRepairProgress('sync-browser-settings');
     synchronizeConfiguredBrowserRepairSettings();
+    reportRepairProgress('refresh-plugins');
+    try {
+      await refreshOpenClawPluginRegistryForBrowserSelfHeal();
+    } catch (error) {
+      reportRepairProgress('refresh-plugins', readCliErrorDetail(error) || (error instanceof Error ? error.message : String(error)));
+    }
     reportRepairProgress('restart-gateway');
     await restartGatewayService();
+    await waitForBrowserGatewayReady(BROWSER_SELF_HEAL_GATEWAY_READY_TIMEOUT_MS, reportRepairProgress);
     reportRepairProgress('stop-browser');
     await stopOpenClawBrowserBestEffort();
 
@@ -6870,11 +8361,13 @@ app.post('/api/config/browser-health/self-heal', async (_req, res) => {
     }
 
     reportRepairProgress('finalize');
+    const health = await runBrowserHealthCheck(reportRepairProgress);
 
     res.json({
       success: true,
       gatewayRestarted: true,
       resetProfile: shouldResetProfile,
+      health,
     });
   } catch (error: any) {
     if (isStructuredRequestError(error)) {
@@ -7018,6 +8511,100 @@ app.put('/api/models/fallbacks', async (req, res) => {
   } catch (err: any) {
     const detail = typeof err?.message === 'string' ? err.message : '';
     res.status(400).json(buildStructuredApiError(MODEL_UPDATE_FAILED_ERROR_CODE, detail || 'Failed to update fallback models'));
+  }
+});
+
+app.get('/api/models/image-generation', (_req, res) => {
+  try {
+    res.json({
+      success: true,
+      config: agentProvisioner.readImageGenerationModelConfig(),
+    });
+  } catch (err: any) {
+    res.status(500).json(buildStructuredApiError(MODEL_UPDATE_FAILED_ERROR_CODE, err?.message));
+  }
+});
+
+app.get('/api/models/image-generation/providers', async (req, res) => {
+  try {
+    const snapshot = await readOpenClawImageProviderSnapshot({
+      refresh: req.query.refresh === '1',
+      allowStaleOnError: true,
+    });
+    res.json({
+      success: true,
+      providers: snapshot.providers,
+      models: snapshot.models,
+      updatedAt: snapshot.updatedAt,
+      cache: snapshot.cache || null,
+    });
+  } catch (err: any) {
+    res.status(500).json(buildStructuredApiError(MODEL_TEST_FAILED_ERROR_CODE, err?.message || 'Failed to read OpenClaw image generation providers'));
+  }
+});
+
+app.put('/api/models/image-generation', async (req, res) => {
+  try {
+    const primary = typeof req.body?.primary === 'string' ? req.body.primary : null;
+    if (!Array.isArray(req.body?.fallbacks)) {
+      return res.status(400).json(buildStructuredApiError(MODEL_UPDATE_FAILED_ERROR_CODE, 'fallbacks must be an array'));
+    }
+
+    const success = await agentProvisioner.updateImageGenerationModelConfig(
+      primary,
+      normalizeFallbackList(req.body.fallbacks),
+    );
+    res.json({
+      success: true,
+      changed: success,
+      config: agentProvisioner.readImageGenerationModelConfig(),
+    });
+  } catch (err: any) {
+    const detail = typeof err?.message === 'string' ? err.message : '';
+    res.status(400).json(buildStructuredApiError(MODEL_UPDATE_FAILED_ERROR_CODE, detail || 'Failed to update image generation model'));
+  }
+});
+
+app.post('/api/models/test-image-generation', async (req, res) => {
+  try {
+    const endpoint = typeof req.body?.endpoint === 'string' ? req.body.endpoint.trim() : '';
+    const modelName = typeof req.body?.modelName === 'string' ? req.body.modelName.trim() : '';
+    const modelId = typeof req.body?.modelId === 'string' ? req.body.modelId.trim() : '';
+    const modelRef = modelId || (endpoint && modelName ? `${endpoint}/${modelName}` : '');
+    if (!modelRef) {
+      return res.status(400).json(buildStructuredApiError(MODEL_TEST_FAILED_ERROR_CODE, 'endpoint/modelName or modelId required'));
+    }
+
+    const startTime = Date.now();
+    const snapshot = await readOpenClawImageProviderSnapshot();
+    const matchedNameInput = modelName || modelId || modelRef;
+    const matched = findImageProviderModel(snapshot, modelRef) || findImageProviderModelByName(snapshot, matchedNameInput);
+    if (!matched) {
+      return res.json(buildStructuredApiError(
+        MODEL_TEST_FAILED_ERROR_CODE,
+        `OpenClaw image_generate provider list does not include "${modelRef}" or model name "${matchedNameInput}". Available image models: ${summarizeImageProviderModels(snapshot)}`
+      ));
+    }
+
+    const provider = snapshot.providers.find((entry) => entry.id === matched.providerId) || null;
+    const exactMatch = matched.id === modelRef;
+    res.json({
+      success: true,
+      lightweight: true,
+      message: 'OpenClaw recognizes this image generation model',
+      latency: Date.now() - startTime,
+      model: matched,
+      provider,
+      cache: snapshot.cache || null,
+      matchMode: exactMatch ? 'exact' : 'modelName',
+      warning: !exactMatch
+        ? `Model name "${matchedNameInput}" is recognized by OpenClaw image providers as "${matched.id}". Endpoint prefix "${endpoint}" and credentials are not verified by the lightweight check.`
+        : provider?.configured === false
+          ? 'Provider/model is recognized by OpenClaw. Credentials are not verified by the lightweight check.'
+        : null,
+    });
+  } catch (err: any) {
+    res.status(500).json(buildStructuredApiError(MODEL_TEST_FAILED_ERROR_CODE, err?.message || 'Failed to validate image generation model'));
   }
 });
 
@@ -7457,8 +9044,12 @@ app.put('/api/characters/:agentId/user-md', (req, res) => {
 app.get('/api/sessions', (_req, res) => {
   const sessions = sessionManager.getAllSessions();
   const sessionsWithModel = sessions.map(session => {
+    const runtimeSettings = readEffectiveAgentRuntimeSettings(session, session.agentId);
     return {
       ...session,
+      runtimeMode: runtimeSettings.runtimeMode,
+      systemPromptMode: runtimeSettings.systemPromptMode,
+      toolMode: runtimeSettings.toolMode,
       model: agentProvisioner.readAgentModel(session.agentId) || ''
     };
   });
@@ -7469,7 +9060,9 @@ app.post('/api/sessions', async (req, res) => {
   const { id, name, soulContent, userContent, agentsContent, toolsContent, heartbeatContent, identityContent, model, process_start_tag, process_end_tag } = req.body;
   const fallbackMode = normalizeFallbackMode(req.body?.fallbackMode) ?? 'inherit';
   const fallbacks = normalizeFallbackList(req.body?.fallbacks);
-  const prompt = soulContent;
+  const runtimeMode = normalizeAgentRuntimeMode(req.body?.runtimeMode ?? req.body?.runtime_mode);
+  const systemPromptMode = normalizeAgentSystemPromptMode(req.body?.systemPromptMode ?? req.body?.system_prompt_mode);
+  const toolMode = normalizeAgentToolMode(req.body?.toolMode ?? req.body?.tool_mode);
 
   const rawId = typeof id === 'string' ? id : '';
   const normalizedId = rawId.trim();
@@ -7488,13 +9081,21 @@ app.post('/api/sessions', async (req, res) => {
 
   try {
     // Provide basic default for first session if it doesn't exist
-    const newSession = sessionManager.createSession({ id: normalizedId, name, prompt, process_start_tag, process_end_tag });
+    const newSession = sessionManager.createSession({
+      id: normalizedId,
+      name,
+      process_start_tag,
+      process_end_tag,
+      runtime_mode: runtimeMode,
+      system_prompt_mode: systemPromptMode,
+      tool_mode: toolMode,
+    });
     const agentId = newSession.id;
 
     // Provision agent workspace
     await agentProvisioner.provision({ 
       agentId, 
-      soulContent: prompt,
+      soulContent,
       userContent,
       agentsContent,
       toolsContent,
@@ -7503,6 +9104,8 @@ app.post('/api/sessions', async (req, res) => {
       model,
       fallbackMode,
       fallbacks,
+      systemPromptMode,
+      toolMode,
     });
     
     // Update session record with the auto-generated agentId
@@ -7519,7 +9122,9 @@ app.put('/api/sessions/:id', async (req, res) => {
   const { name, soulContent, userContent, agentsContent, toolsContent, heartbeatContent, identityContent, model, process_start_tag, process_end_tag } = req.body;
   const fallbackMode = normalizeFallbackMode(req.body?.fallbackMode) ?? 'inherit';
   const fallbacks = normalizeFallbackList(req.body?.fallbacks);
-  const prompt = soulContent;
+  const runtimeMode = normalizeAgentRuntimeMode(req.body?.runtimeMode ?? req.body?.runtime_mode);
+  const systemPromptMode = normalizeAgentSystemPromptMode(req.body?.systemPromptMode ?? req.body?.system_prompt_mode);
+  const toolMode = normalizeAgentToolMode(req.body?.toolMode ?? req.body?.tool_mode);
   const session = sessionManager.getSession(req.params.id);
   
   if (!session) {
@@ -7527,10 +9132,17 @@ app.put('/api/sessions/:id', async (req, res) => {
   }
 
   try {
-    const updated = sessionManager.updateSession(req.params.id, { name, prompt, process_start_tag, process_end_tag });
+    const updated = sessionManager.updateSession(req.params.id, {
+      name,
+      process_start_tag,
+      process_end_tag,
+      runtime_mode: runtimeMode,
+      system_prompt_mode: systemPromptMode,
+      tool_mode: toolMode,
+    });
     
     if (session.agentId) {
-      await agentProvisioner.updateSoul(session.agentId, prompt || '');
+      await agentProvisioner.updateSoul(session.agentId, soulContent || '');
       if (userContent !== undefined) agentProvisioner.writeAgentFile(session.agentId, 'USER.md', userContent);
       if (agentsContent !== undefined) agentProvisioner.writeAgentFile(session.agentId, 'AGENTS.md', agentsContent);
       if (toolsContent !== undefined) agentProvisioner.writeAgentFile(session.agentId, 'TOOLS.md', toolsContent);
@@ -7539,6 +9151,7 @@ app.put('/api/sessions/:id', async (req, res) => {
       
       // Model update might require gateway restart
       const modelChanged = await agentProvisioner.updateModel(session.agentId, model, { mode: fallbackMode, fallbacks });
+      agentProvisioner.updateAgentRuntimeConfig(session.agentId, { systemPromptMode, toolMode });
       if (modelChanged) {
         // Gateway auto-reloads config
       }
@@ -7567,6 +9180,17 @@ app.delete('/api/sessions/:id', async (req, res) => {
   try {
     await activeRunManager.abortRun(req.params.id);
   } catch {}
+  try {
+    const client = await getConnection(req.params.id);
+    await abortOpenClawSessionRuns(
+      client,
+      buildOpenClawChatSessionKey(req.params.id, agentId || 'main'),
+      `session ${req.params.id} delete`,
+      { retryOnMiss: true },
+    );
+  } catch (error) {
+    console.warn(`[chat] Failed to abort orphan OpenClaw runs while deleting session ${req.params.id}:`, error);
+  }
   disconnectConnection(req.params.id);
   const success = sessionManager.deleteSession(req.params.id);
   
@@ -7600,6 +9224,17 @@ app.post('/api/sessions/:id/reset', async (req, res) => {
     try {
       await activeRunManager.abortRun(req.params.id);
     } catch {}
+    try {
+      const client = await getConnection(req.params.id);
+      await abortOpenClawSessionRuns(
+        client,
+        buildOpenClawChatSessionKey(req.params.id, agentId || 'main'),
+        `session ${req.params.id} reset`,
+        { retryOnMiss: true },
+      );
+    } catch (error) {
+      console.warn(`[chat] Failed to abort orphan OpenClaw runs while resetting session ${req.params.id}:`, error);
+    }
     disconnectConnection(req.params.id);
 
     // Clear database records
@@ -7610,6 +9245,7 @@ app.post('/api/sessions/:id/reset', async (req, res) => {
     if (agentId) {
       const workspacePath = agentProvisioner.getWorkspacePath(agentId);
       const modelConfig = agentProvisioner.readAgentModelConfig(agentId);
+      const runtimeConfig = agentProvisioner.readAgentRuntimeConfig(agentId);
       resetAgentWorkspaceToInitialState(workspacePath);
       resetAgentRuntimeStateToInitialState(agentId);
       await agentProvisioner.provision({
@@ -7618,6 +9254,8 @@ app.post('/api/sessions/:id/reset', async (req, res) => {
         model: modelConfig.modelOverride || undefined,
         fallbackMode: modelConfig.fallbackMode,
         fallbacks: modelConfig.fallbacks,
+        systemPromptMode: runtimeConfig.systemPromptMode,
+        toolMode: runtimeConfig.toolMode,
       });
     }
 
@@ -7629,7 +9267,7 @@ app.post('/api/sessions/:id/reset', async (req, res) => {
 });
 
 // Endpoint to fetch all configuring MD files for a given session's agent
-app.get('/api/sessions/:id/configs', (req, res) => {
+app.get('/api/sessions/:id/configs', async (req, res) => {
   const session = sessionManager.getSession(req.params.id);
   if (!session) {
     return res.status(404).json({ success: false, error: 'Session not found' });
@@ -7637,6 +9275,8 @@ app.get('/api/sessions/:id/configs', (req, res) => {
   
   const agentId = session.agentId;
   const modelConfig = agentProvisioner.readAgentModelConfig(agentId);
+  const runtimeSettings = readEffectiveAgentRuntimeSettings(session, agentId);
+  const runtimeMetrics = agentProvisioner.readAgentRuntimeMetrics(agentId);
   res.json({
     success: true,
     configs: {
@@ -7651,6 +9291,10 @@ app.get('/api/sessions/:id/configs', (req, res) => {
       resolvedModel: modelConfig.resolvedModel,
       fallbackMode: modelConfig.fallbackMode,
       fallbacks: modelConfig.fallbacks,
+      runtimeMode: runtimeSettings.runtimeMode,
+      systemPromptMode: runtimeSettings.systemPromptMode,
+      toolMode: runtimeSettings.toolMode,
+      runtimeMetrics,
     }
   });
 });
@@ -7721,8 +9365,16 @@ interface ActiveRun {
   startedAt: number;
   workspacePath: string;
   finalSessionKey: string;
+  processStartTag?: string;
+  processEndTag?: string;
   historySnapshot: ChatHistorySnapshot;
-  text: string;           // Accumulated text so far
+  rawText: string;
+  text: string;
+  modelProcessContent: string;
+  modelProcessStreaming: boolean;
+  toolProcessContent: string;
+  processContent: string;
+  processStreaming: boolean;
   clients: express.Response[]; // Active SSE clients listening to this run
   idleTimeout?: NodeJS.Timeout;
   completionProbeTimer?: NodeJS.Timeout;
@@ -7730,6 +9382,8 @@ interface ActiveRun {
   completionProbePending?: boolean;
   firstCompletionWaitResolvedAt?: number;
   visibleFinalText?: string;
+  visibleProcessContent?: string;
+  visibleProcessStreaming?: boolean;
   finalEventText?: string;
   finalEventGeneration: number;
   settledCalibrationGeneration: number;
@@ -7738,9 +9392,19 @@ interface ActiveRun {
   lastObservedHistorySignature: string;
   lastObservedHistoryActivityAt?: number;
   pendingErrorDetail?: string;
+  toolProgressLines: string[];
+  activeToolCallIds: Set<string>;
+  toolProgressById: Map<string, GroupToolProgressState>;
+  sessionEventsSubscribed?: boolean;
   clientRef?: OpenClawClient;
   cleanedUp?: boolean;
 }
+
+type SplitChatProcessOutputResult = {
+  finalContent: string;
+  processContent: string;
+  processStreaming: boolean;
+};
 
 interface PendingChatPreparation {
   sessionId: string;
@@ -7891,41 +9555,118 @@ class ActiveRunManager {
       return { aborted: false };
     }
 
-    const result = await run.clientRef.abortChat({
-      sessionKey: run.finalSessionKey,
-      runId: run.runId,
-    });
+    const clientRef = run.clientRef;
+    let aborted = false;
+    try {
+      const result = await clientRef.abortChat({
+        sessionKey: run.finalSessionKey,
+        runId: run.runId,
+        timeoutMs: CHAT_ORPHAN_ABORT_TIMEOUT_MS,
+      });
+      aborted = result.aborted;
+      if (!result.aborted) {
+        scheduleOpenClawSessionAbortRetry(
+          clientRef,
+          run.finalSessionKey,
+          `active run ${run.runId} for session ${sessionId}`,
+        );
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      console.warn(`[chat] Failed to abort active OpenClaw run ${run.runId} for session ${sessionId}: ${detail}`);
+      scheduleOpenClawSessionAbortRetry(
+        clientRef,
+        run.finalSessionKey,
+        `active run ${run.runId} for session ${sessionId}`,
+      );
+    }
 
     const canonicalText = canonicalizeAssistantWorkspaceArtifacts(run.text || '', {
       workspacePath: run.workspacePath,
       startedAtMs: run.startedAt,
     });
     const rewritten = rewriteOpenClawMediaPaths(canonicalText, run.workspacePath);
-    this.db.updateMessage(run.messageId, rewritten, run.modelUsed);
+    const rewrittenProcessContent = rewriteOpenClawMediaPaths(run.processContent || '', run.workspacePath);
+    this.db.updateMessage(run.messageId, rewritten, run.modelUsed, rewrittenProcessContent);
 
     run.clients.forEach((res) => {
-      res.write(`data: ${JSON.stringify({ type: 'final', text: rewritten })}\n\n`);
+      res.write(`data: ${JSON.stringify({
+        type: 'final',
+        text: rewritten,
+        process_content: rewrittenProcessContent,
+        process_streaming: false,
+      })}\n\n`);
       res.end();
     });
 
     this.cleanupRun(run);
-    return { aborted: result.aborted };
+    return { aborted };
   }
 
-  private emitVisibleFinal(run: ActiveRun, finalText: string, options?: { end?: boolean }) {
-    const protectedFinalText = selectPreferredTextSnapshot(run.text, finalText);
-    if (protectedFinalText) {
-      run.text = protectedFinalText;
+  private applyRawTextSnapshot(
+    run: ActiveRun,
+    candidateText?: string | null,
+    options?: { allowShorterReplacement?: boolean },
+  ) {
+    const nextRawText = selectPreferredTextSnapshot(run.rawText, candidateText, options);
+    const rawChanged = nextRawText !== run.rawText;
+    if (rawChanged) {
+      run.rawText = nextRawText;
     }
+
+    const splitOutput = splitChatProcessOutput(run.rawText, run.processStartTag, run.processEndTag);
+    run.text = splitOutput.finalContent;
+    run.modelProcessContent = splitOutput.processContent;
+    run.modelProcessStreaming = splitOutput.processStreaming;
+    run.processContent = run.toolProcessContent;
+    run.processStreaming = run.modelProcessStreaming || run.activeToolCallIds.size > 0;
+    return rawChanged;
+  }
+
+  private buildVisibleChatPatch(run: ActiveRun, content: string, processContent = run.processContent, processStreaming = run.processStreaming) {
+    const rewritten = rewriteOpenClawMediaPaths(content, run.workspacePath);
+    const rewrittenProcessContent = rewriteOpenClawMediaPaths(processContent, run.workspacePath);
+    return {
+      text: rewritten,
+      process_content: rewrittenProcessContent,
+      process_streaming: processStreaming,
+    };
+  }
+
+  private emitVisibleDelta(run: ActiveRun, options?: { force?: boolean }) {
+    const visible = this.buildVisibleChatPatch(run, run.text);
+    const didVisibleChange = visible.text !== run.visibleFinalText
+      || visible.process_content !== run.visibleProcessContent
+      || visible.process_streaming !== run.visibleProcessStreaming;
+
+    if (!options?.force && !didVisibleChange) {
+      return;
+    }
+
+    run.visibleFinalText = visible.text;
+    run.visibleProcessContent = visible.process_content;
+    run.visibleProcessStreaming = visible.process_streaming;
+    run.clients.forEach(res => {
+      res.write(`data: ${JSON.stringify({ type: 'delta', ...visible })}\n\n`);
+    });
+  }
+
+  private emitVisibleFinal(run: ActiveRun, finalText: string, options?: { end?: boolean; allowShorterReplacement?: boolean }) {
+    this.applyRawTextSnapshot(run, finalText, {
+      allowShorterReplacement: options?.allowShorterReplacement,
+    });
     const canonicalText = options?.end
-      ? canonicalizeAssistantWorkspaceArtifacts(protectedFinalText || run.text, {
+      ? canonicalizeAssistantWorkspaceArtifacts(run.text, {
           workspacePath: run.workspacePath,
           startedAtMs: run.startedAt,
         })
-      : (protectedFinalText || run.text);
-    const rewritten = rewriteOpenClawMediaPaths(canonicalText, run.workspacePath);
-    const nextVisibleFinalText = selectPreferredTextSnapshot(run.visibleFinalText, rewritten);
-    if (!nextVisibleFinalText.trim()) {
+      : run.text;
+    const visible = this.buildVisibleChatPatch(run, canonicalText, run.processContent, options?.end ? false : run.processStreaming);
+    const nextVisibleFinalText = selectPreferredTextSnapshot(run.visibleFinalText, visible.text, {
+      allowShorterReplacement: options?.allowShorterReplacement,
+    });
+    const nextVisibleProcessContent = selectPreferredTextSnapshot(run.visibleProcessContent, visible.process_content);
+    if (!nextVisibleFinalText.trim() && !nextVisibleProcessContent.trim()) {
       if (options?.end) {
         run.clients.forEach((res) => {
           res.end();
@@ -7934,11 +9675,21 @@ class ActiveRunManager {
       return '';
     }
 
-    const shouldSendFinalEvent = run.visibleFinalText !== nextVisibleFinalText;
+    const shouldSendFinalEvent = !!options?.end
+      || run.visibleFinalText !== nextVisibleFinalText
+      || run.visibleProcessContent !== nextVisibleProcessContent
+      || run.visibleProcessStreaming !== visible.process_streaming;
     if (shouldSendFinalEvent) {
       run.visibleFinalText = nextVisibleFinalText;
+      run.visibleProcessContent = nextVisibleProcessContent;
+      run.visibleProcessStreaming = visible.process_streaming;
       run.clients.forEach((res) => {
-        res.write(`data: ${JSON.stringify({ type: 'final', text: nextVisibleFinalText })}\n\n`);
+        res.write(`data: ${JSON.stringify({
+          type: 'final',
+          text: nextVisibleFinalText,
+          process_content: nextVisibleProcessContent,
+          process_streaming: visible.process_streaming,
+        })}\n\n`);
         if (options?.end) {
           res.end();
         }
@@ -7965,7 +9716,10 @@ class ActiveRunManager {
     workspacePath: string,
     clientRef: OpenClawClient,
     finalSessionKey: string,
-    historySnapshot: ChatHistorySnapshot
+    historySnapshot: ChatHistorySnapshot,
+    processStartTag?: string,
+    processEndTag?: string,
+    sessionEventsSubscribed = false
   ): ActiveRun {
     const run: ActiveRun = {
       sessionId,
@@ -7977,8 +9731,16 @@ class ActiveRunManager {
       startedAt: Date.now(),
       workspacePath,
       finalSessionKey,
+      processStartTag,
+      processEndTag,
       historySnapshot,
+      rawText: '',
       text: '',
+      modelProcessContent: '',
+      modelProcessStreaming: false,
+      toolProcessContent: '',
+      processContent: '',
+      processStreaming: !!(processStartTag && processEndTag),
       clients: [],
       completionProbePending: false,
       firstCompletionWaitResolvedAt: undefined,
@@ -7989,6 +9751,10 @@ class ActiveRunManager {
       lastObservedHistorySignature: historySnapshot.latestSignature,
       lastObservedHistoryActivityAt: undefined,
       pendingErrorDetail: undefined,
+      toolProgressLines: [],
+      activeToolCallIds: new Set<string>(),
+      toolProgressById: new Map<string, GroupToolProgressState>(),
+      sessionEventsSubscribed,
       clientRef
     };
     this.runs.set(sessionId, run);
@@ -7997,16 +9763,11 @@ class ActiveRunManager {
     const onDelta = (data: { sessionKey: string; runId: string; text: string }) => {
       if (this.matchesRunEvent(run, data.sessionKey, data.runId)) {
         this.resetIdleTimeout(run);
-        const nextText = selectPreferredTextSnapshot(run.text, data.text);
-        const didTextChange = nextText !== run.text;
-        run.text = nextText;
+        const didTextChange = this.applyRawTextSnapshot(run, data.text);
         if (!didTextChange) {
           return;
         }
-        const rewritten = rewriteOpenClawMediaPaths(run.text, run.workspacePath);
-        run.clients.forEach(res => {
-          res.write(`data: ${JSON.stringify({ type: 'delta', text: rewritten })}\n\n`);
-        });
+        this.emitVisibleDelta(run);
       }
     };
 
@@ -8015,13 +9776,20 @@ class ActiveRunManager {
         const finalEventObservedAt = Date.now();
         const terminalFinalText = resolveChatFinalTextSnapshot(data.text, data.message);
         if (terminalFinalText) {
-          run.finalEventText = selectPreferredTextSnapshot(run.finalEventText, terminalFinalText);
-          run.text = selectPreferredTextSnapshot(run.text, terminalFinalText);
+          run.finalEventText = selectPreferredTextSnapshot(run.finalEventText, terminalFinalText, {
+            allowShorterReplacement: true,
+          });
+          this.applyRawTextSnapshot(run, terminalFinalText, {
+            allowShorterReplacement: true,
+          });
           run.latestFinalEventAt = finalEventObservedAt;
           run.finalEventGeneration += 1;
-          this.emitVisibleFinal(run, run.finalEventText || run.text);
+          this.emitVisibleFinal(run, run.finalEventText || run.rawText, {
+            allowShorterReplacement: true,
+          });
         } else if (data.text) {
-          run.text = selectPreferredTextSnapshot(run.text, data.text);
+          this.applyRawTextSnapshot(run, data.text);
+          this.emitVisibleDelta(run);
         }
         this.resetIdleTimeout(run);
         this.scheduleCompletionProbe(run, 0);
@@ -8031,7 +9799,8 @@ class ActiveRunManager {
     const onAborted = (data: { sessionKey: string; runId: string; text: string }) => {
       if (this.matchesRunEvent(run, data.sessionKey, data.runId)) {
         if (data.text) {
-          run.text = selectPreferredTextSnapshot(run.text, data.text);
+          this.applyRawTextSnapshot(run, data.text);
+          this.emitVisibleDelta(run);
         }
         this.scheduleCompletionProbe(run, 0);
       }
@@ -8045,6 +9814,67 @@ class ActiveRunManager {
       }
     };
 
+    const onSessionTool = (payload: {
+      sessionKey?: string;
+      parentSessionKey?: string;
+      runId?: string;
+      data?: any;
+    }) => {
+      const isRelevant = payload.runId === run.runId
+        || this.matchesRunEvent(run, payload.sessionKey || '', payload.runId)
+        || payload.parentSessionKey === run.finalSessionKey;
+      if (!isRelevant) {
+        return;
+      }
+
+      const eventData = payload.data && typeof payload.data === 'object' && !Array.isArray(payload.data)
+        ? payload.data as Record<string, unknown>
+        : {};
+      const toolName = typeof eventData.name === 'string' && eventData.name.trim()
+        ? eventData.name.trim()
+        : 'tool';
+      const toolCallId = typeof eventData.toolCallId === 'string' && eventData.toolCallId.trim()
+        ? eventData.toolCallId.trim()
+        : `${payload.runId || run.runId}:${toolName}`;
+      const phase = typeof eventData.phase === 'string' ? eventData.phase.trim() : '';
+      const existingState = run.toolProgressById.get(toolCallId);
+      const nextArgs = normalizeToolArgsRecord(eventData.args) ?? existingState?.args;
+      const nextState: GroupToolProgressState = existingState ?? {
+        toolName,
+        args: nextArgs,
+      };
+      nextState.toolName = toolName;
+      nextState.args = nextArgs;
+
+      const progressLocale = normalizeGroupToolProgressLocale(configManager.getConfig().language);
+      if (phase === 'start') {
+        run.activeToolCallIds.add(toolCallId);
+        appendToolProgressLine(run.toolProgressLines, formatToolStartProgress(progressLocale, toolName, nextArgs));
+      } else if (phase === 'update') {
+        run.activeToolCallIds.add(toolCallId);
+      } else if (phase === 'result') {
+        run.activeToolCallIds.delete(toolCallId);
+        appendToolProgressLine(run.toolProgressLines, formatToolResultProgress(
+          progressLocale,
+          toolName,
+          nextArgs,
+          eventData.isError === true,
+        ));
+      } else {
+        return;
+      }
+
+      run.toolProcessContent = run.toolProgressLines.join('\n');
+      if (phase === 'result') {
+        run.toolProgressById.delete(toolCallId);
+      } else {
+        run.toolProgressById.set(toolCallId, nextState);
+      }
+      this.applyRawTextSnapshot(run);
+      this.emitVisibleDelta(run, { force: true });
+      this.resetIdleTimeout(run);
+    };
+
     const onDisconnect = () => {
       onError({ sessionKey: sessionId, runId, error: CHAT_GATEWAY_DISCONNECTED_DETAIL });
     };
@@ -8053,6 +9883,7 @@ class ActiveRunManager {
     clientRef.on('chat.final', onFinal);
     clientRef.on('chat.aborted', onAborted);
     clientRef.on('chat.error', onError);
+    clientRef.on('session.tool', onSessionTool);
     clientRef.on('disconnected', onDisconnect);
 
     // Attach listeners to run for easy cleanup
@@ -8060,6 +9891,7 @@ class ActiveRunManager {
     (run as any)._onFinal = onFinal;
     (run as any)._onAborted = onAborted;
     (run as any)._onError = onError;
+    (run as any)._onSessionTool = onSessionTool;
     (run as any)._onDisconnect = onDisconnect;
 
     this.scheduleCompletionProbe(run);
@@ -8084,12 +9916,16 @@ class ActiveRunManager {
           modelUsed: run.modelUsed,
         })}\n\n`);
       }
-      if (run.visibleFinalText) {
-        res.write(`data: ${JSON.stringify({ type: 'final', text: run.visibleFinalText })}\n\n`);
-      } else if (run.text) {
-        // Immediately send current accumulated text
-        const rewritten = rewriteOpenClawMediaPaths(run.text, run.workspacePath);
-        res.write(`data: ${JSON.stringify({ type: 'delta', text: rewritten })}\n\n`);
+      if (run.visibleFinalText || run.visibleProcessContent) {
+        res.write(`data: ${JSON.stringify({
+          type: 'final',
+          text: run.visibleFinalText || '',
+          process_content: run.visibleProcessContent || '',
+          process_streaming: !!run.visibleProcessStreaming,
+        })}\n\n`);
+      } else if (run.text || run.processContent || run.processStreaming) {
+        const visible = this.buildVisibleChatPatch(run, run.text);
+        res.write(`data: ${JSON.stringify({ type: 'delta', ...visible })}\n\n`);
       }
       res.on('close', () => {
         run.clients = run.clients.filter(c => c !== res);
@@ -8106,16 +9942,19 @@ class ActiveRunManager {
         this.cleanupRun(run);
         return;
       }
-      const errorMsg = run.text ? 'Response interrupted (idle timeout).' : 'Response timed out (no connection).';
-      const finalText = run.text || errorMsg;
-      const canonicalText = canonicalizeAssistantWorkspaceArtifacts(finalText, {
+      const errorMsg = run.rawText ? 'Response interrupted (idle timeout).' : 'Response timed out (no connection).';
+      const finalText = run.rawText || errorMsg;
+      this.applyRawTextSnapshot(run, finalText);
+      const canonicalText = canonicalizeAssistantWorkspaceArtifacts(run.text, {
         workspacePath: run.workspacePath,
         startedAtMs: run.startedAt,
       });
       const rewritten = rewriteOpenClawMediaPaths(canonicalText, run.workspacePath);
+      const rewrittenProcessContent = rewriteOpenClawMediaPaths(run.processContent, run.workspacePath);
       
-      this.db.updateMessage(run.messageId, rewritten, run.modelUsed);
-      this.emitVisibleFinal(run, canonicalText, { end: true });
+      this.db.updateMessage(run.messageId, rewritten, run.modelUsed, rewrittenProcessContent);
+      this.emitVisibleFinal(run, finalText, { end: true });
+      this.abortUnderlyingRunBestEffort(run, 'idle timeout');
       this.cleanupRun(run);
     }, 600000); // 10 minutes
   }
@@ -8128,6 +9967,16 @@ class ActiveRunManager {
       || sessionKey === run.sessionId
       || sessionKey.endsWith(`:${run.sessionId}`)
       || sessionKey.includes(`:chat:${run.sessionId}`);
+  }
+
+  private hasAnyRunEvidence(run: ActiveRun) {
+    return !!(
+      run.rawText.trim()
+      || run.finalEventText?.trim()
+      || run.processContent.trim()
+      || run.pendingErrorDetail?.trim()
+      || run.lastObservedHistoryActivityAt !== undefined
+    );
   }
 
   private scheduleCompletionProbe(run: ActiveRun, delay = CHAT_STREAM_COMPLETION_PROBE_DELAY_MS) {
@@ -8162,7 +10011,10 @@ class ActiveRunManager {
       }
       if (!this.isCurrentRun(run)) return;
 
-      let completedOutput = selectPreferredTextSnapshot(run.text, run.finalEventText);
+      const hasFinalEventText = () => !!run.finalEventText?.trim();
+      let completedOutput = selectPreferredTextSnapshot(run.rawText, run.finalEventText, {
+        allowShorterReplacement: hasFinalEventText(),
+      });
       let settledErrorDetail = '';
       let shouldRetryForEmptyCompletion = false;
       let sawSettledAssistantText = false;
@@ -8236,7 +10088,9 @@ class ActiveRunManager {
         shouldRetryForEmptyCompletion = true;
       }
 
-      completedOutput = selectPreferredTextSnapshot(completedOutput, run.finalEventText);
+      completedOutput = selectPreferredTextSnapshot(completedOutput, run.finalEventText, {
+        allowShorterReplacement: hasFinalEventText(),
+      });
 
       const hasSettledAssistantText = bestSettledAssistantText.trim().length > 0;
       const hasStableVisibleFinalText = probeFinalGeneration > 0
@@ -8327,38 +10181,80 @@ class ActiveRunManager {
   private finalizeRun(run: ActiveRun, finalText: string) {
     if (!this.isCurrentRun(run)) return;
 
-    let protectedFinalText = selectPreferredTextSnapshot(run.text, finalText);
-    protectedFinalText = selectPreferredTextSnapshot(protectedFinalText, run.finalEventText);
-    if (protectedFinalText) {
-      run.text = protectedFinalText;
-    }
-    const canonicalText = canonicalizeAssistantWorkspaceArtifacts(protectedFinalText || run.text, {
+    const hasFinalEventText = !!run.finalEventText?.trim();
+    let protectedRawText = selectPreferredTextSnapshot(run.rawText, finalText);
+    protectedRawText = selectPreferredTextSnapshot(protectedRawText, run.finalEventText, {
+      allowShorterReplacement: hasFinalEventText,
+    });
+    this.applyRawTextSnapshot(run, protectedRawText, {
+      allowShorterReplacement: hasFinalEventText,
+    });
+    run.processStreaming = false;
+
+    const canonicalText = canonicalizeAssistantWorkspaceArtifacts(run.text, {
       workspacePath: run.workspacePath,
       startedAtMs: run.startedAt,
     });
     const rewritten = rewriteOpenClawMediaPaths(canonicalText, run.workspacePath);
+    const rewrittenProcessContent = rewriteOpenClawMediaPaths(run.processContent, run.workspacePath);
     if (!rewritten.trim()) {
+      const canonicalFallbackText = canonicalizeAssistantWorkspaceArtifacts(run.modelProcessContent, {
+        workspacePath: run.workspacePath,
+        startedAtMs: run.startedAt,
+      });
+      const rewrittenFallbackText = rewriteOpenClawMediaPaths(canonicalFallbackText, run.workspacePath);
+      if (rewrittenFallbackText.trim()) {
+        run.text = canonicalFallbackText;
+        run.modelProcessContent = '';
+        run.processContent = run.toolProcessContent;
+        run.processStreaming = false;
+        const rewrittenFallbackProcessContent = rewriteOpenClawMediaPaths(run.processContent, run.workspacePath);
+
+        this.db.updateMessage(run.messageId, rewrittenFallbackText, run.modelUsed, rewrittenFallbackProcessContent);
+        run.visibleFinalText = rewrittenFallbackText;
+        run.visibleProcessContent = rewrittenFallbackProcessContent;
+        run.visibleProcessStreaming = false;
+        run.clients.forEach((res) => {
+          res.write(`data: ${JSON.stringify({
+            type: 'final',
+            text: rewrittenFallbackText,
+            process_content: rewrittenFallbackProcessContent,
+            process_streaming: false,
+          })}\n\n`);
+          res.end();
+        });
+        this.cleanupRun(run);
+        return;
+      }
       this.failRun(run, 'No text output returned from the run.');
       return;
     }
 
-    this.db.updateMessage(run.messageId, rewritten, run.modelUsed);
-    this.emitVisibleFinal(run, canonicalText, { end: true });
+    this.db.updateMessage(run.messageId, rewritten, run.modelUsed, rewrittenProcessContent);
+    this.emitVisibleFinal(run, protectedRawText, {
+      end: true,
+      allowShorterReplacement: hasFinalEventText,
+    });
     this.cleanupRun(run);
   }
 
-  private failRun(run: ActiveRun, detail: string) {
+  private failRun(run: ActiveRun, detail: string, options?: {
+    messageCode?: string;
+  }) {
     if (!this.isCurrentRun(run)) return;
 
-    const structuredError = createStructuredChatError(detail);
+    const structuredError = createStructuredChatError(detail, options?.messageCode);
 
-    this.db.updateMessage(run.messageId, structuredError.content, run.modelUsed);
+    run.processStreaming = false;
+    this.db.updateMessage(run.messageId, structuredError.content, run.modelUsed, run.processContent);
     this.db.updateMessageEnvelope(run.messageId, structuredError.role, structuredError.agent_id, structuredError.agent_name);
 
     run.clients.forEach(res => {
       res.write(`data: ${JSON.stringify({
         type: 'error',
         text: structuredError.content,
+        process_content: rewriteOpenClawMediaPaths(run.processContent, run.workspacePath),
+        process_streaming: false,
         messageCode: structuredError.messageCode,
         messageParams: structuredError.messageParams,
         rawDetail: structuredError.rawDetail,
@@ -8366,7 +10262,39 @@ class ActiveRunManager {
       })}\n\n`);
       res.end();
     });
+    this.abortUnderlyingRunBestEffort(run, detail);
     this.cleanupRun(run);
+  }
+
+  private abortUnderlyingRunBestEffort(run: ActiveRun, reason: string) {
+    if (!run.clientRef || !run.finalSessionKey || !run.runId) {
+      return;
+    }
+
+    const clientRef = run.clientRef;
+    void clientRef.abortChat({
+      sessionKey: run.finalSessionKey,
+      runId: run.runId,
+      timeoutMs: CHAT_ORPHAN_ABORT_TIMEOUT_MS,
+    }).then((result) => {
+      if (!result.aborted) {
+        scheduleOpenClawSessionAbortRetry(
+          clientRef,
+          run.finalSessionKey,
+          `run ${run.runId} for session ${run.sessionId} after ${reason}`,
+        );
+      }
+    }).catch((error) => {
+      const detail = error instanceof Error ? error.message : String(error);
+      console.warn(
+        `[chat] Failed to abort OpenClaw run ${run.runId} for session ${run.sessionId} after ${reason}: ${detail}`,
+      );
+      scheduleOpenClawSessionAbortRetry(
+        clientRef,
+        run.finalSessionKey,
+        `run ${run.runId} for session ${run.sessionId} after ${reason}`,
+      );
+    });
   }
 
   private cleanupRun(run: ActiveRun) {
@@ -8385,7 +10313,14 @@ class ActiveRunManager {
       if ((run as any)._onFinal) run.clientRef.off('chat.final', (run as any)._onFinal);
       if ((run as any)._onAborted) run.clientRef.off('chat.aborted', (run as any)._onAborted);
       if ((run as any)._onError) run.clientRef.off('chat.error', (run as any)._onError);
+      if ((run as any)._onSessionTool) run.clientRef.off('session.tool', (run as any)._onSessionTool);
       if ((run as any)._onDisconnect) run.clientRef.off('disconnected', (run as any)._onDisconnect);
+      if (run.sessionEventsSubscribed) {
+        run.sessionEventsSubscribed = false;
+        void run.clientRef.unsubscribeSessionEvents().catch((error) => {
+          console.warn(`[chat] Failed to unsubscribe session events for session ${run.sessionId}:`, error);
+        });
+      }
     }
     if (this.isCurrentRun(run)) {
       this.runs.delete(run.sessionId);
@@ -8429,6 +10364,67 @@ async function interruptSessionStreamingStateForNewRun(sessionId: string): Promi
   }
 
   return nextEpoch;
+}
+
+function scheduleOpenClawSessionAbortRetry(
+  client: OpenClawClient,
+  sessionKey: string,
+  context: string,
+  attempt = 0,
+) {
+  if (attempt >= CHAT_ABORT_RETRY_DELAYS_MS.length) {
+    console.warn(`[chat] Exhausted OpenClaw abort retries for ${context} (${sessionKey}).`);
+    return;
+  }
+
+  const delay = CHAT_ABORT_RETRY_DELAYS_MS[attempt];
+  const timer = setTimeout(() => {
+    void client.abortChat({
+      sessionKey,
+      timeoutMs: CHAT_ORPHAN_ABORT_TIMEOUT_MS,
+    }).then((result) => {
+      if (result.aborted) {
+        return;
+      }
+      scheduleOpenClawSessionAbortRetry(client, sessionKey, context, attempt + 1);
+    }).catch((error) => {
+      const detail = error instanceof Error ? error.message : String(error);
+      console.warn(`[chat] OpenClaw abort retry ${attempt + 1} failed for ${context} (${sessionKey}): ${detail}`);
+      scheduleOpenClawSessionAbortRetry(client, sessionKey, context, attempt + 1);
+    });
+  }, delay);
+  timer.unref?.();
+}
+
+async function abortOpenClawSessionRuns(
+  client: OpenClawClient,
+  sessionKey: string,
+  context: string,
+  options?: { retryOnMiss?: boolean },
+): Promise<{ aborted: boolean; runIds: string[] }> {
+  try {
+    const result = await client.abortChat({
+      sessionKey,
+      timeoutMs: CHAT_ORPHAN_ABORT_TIMEOUT_MS,
+    });
+    const runIds = Array.isArray(result.runIds) ? result.runIds : [];
+    if (!result.aborted && options?.retryOnMiss) {
+      scheduleOpenClawSessionAbortRetry(client, sessionKey, context);
+    }
+    return {
+      aborted: result.aborted,
+      runIds,
+    };
+  } catch (error) {
+    console.warn(`[chat] Failed to abort orphan OpenClaw runs for ${context} (${sessionKey}):`, error);
+    if (options?.retryOnMiss) {
+      scheduleOpenClawSessionAbortRetry(client, sessionKey, context);
+    }
+    return {
+      aborted: false,
+      runIds: [],
+    };
+  }
 }
 
 async function reconcileInactiveChatLatestMessage(sessionId: string): Promise<void> {
@@ -8646,6 +10642,8 @@ app.post('/api/chat', async (req, res) => {
   let userMsgId: number | undefined;
   let assistantMsgId: number | undefined;
   let pendingPreparationActive = false;
+  let sessionEventsClient: OpenClawClient | null = null;
+  let sessionEventsSubscribed = false;
 
   try {
     const rawMessage = String(message);
@@ -8655,22 +10653,23 @@ app.post('/api/chat', async (req, res) => {
     let injectedInstructions = '';
 
     const agentId = sessionInfo?.agentId || 'main';
+    const runtimeSettings = readEffectiveAgentRuntimeSettings(sessionInfo, agentId);
     const allCharacters = db.getCharacters();
     const character = allCharacters.find(c => c.agentId === agentId);
     const agentName = sessionInfo?.name || character?.name || agentId;
-    const modelUsed = agentProvisioner.readAgentModel(agentId) ||
+    const imageIntentContext = readAgentBootstrapIntentContext(agentId);
+    const directImageModel = shouldUseConfiguredImageGenerationModel(rawMessage, imageIntentContext)
+      ? getConfiguredDirectImageGenerationModel()
+      : null;
+    const modelUsed = directImageModel || agentProvisioner.readAgentModel(agentId) ||
       agentProvisioner.readAvailableModels().find(m => m.primary)?.id || '';
 
     if (sessionInfo) {
-      const history = db.getMessages(normalizedSessionId, 1);
-      if (history.length === 0 && sessionInfo.prompt) {
-        injectedInstructions += `${sessionInfo.prompt}\n\n`;
-      }
       if (sessionInfo.process_start_tag && sessionInfo.process_end_tag) {
         injectedInstructions += `【极其重要：输出格式规范】\n当前启用了结构化思考输出。你关于后续任务决断的所有内部思考、分析或工作执行过程，必须严格包裹在 ${sessionInfo.process_start_tag} 和 ${sessionInfo.process_end_tag} 之间！\n真正的最终沟通、回复语言写在标签外部。\n\n`;
       }
     }
-    if (readMaxPermissionsEnabled() === true) {
+    if (shouldInjectHostTakeoverInstruction(sessionInfo, agentId)) {
       injectedInstructions += `${buildHostTakeoverChatInstruction()}\n\n`;
     }
 
@@ -8752,6 +10751,56 @@ app.post('/api/chat', async (req, res) => {
     res.write(':' + Array(2048).fill(' ').join('') + '\n\n');
     res.write(`data: ${JSON.stringify({ type: 'ids', userMsgId, assistantMsgId })}\n\n`);
 
+    if (directImageModel) {
+      const startProcessContent = buildImageGenerationStartProcessContent(directImageModel);
+      db.updateMessage(assistantMsgId, '', directImageModel, startProcessContent);
+      res.write(`data: ${JSON.stringify({
+        type: 'delta',
+        text: '',
+        process_content: startProcessContent,
+        process_streaming: true,
+        modelUsed: directImageModel,
+        model_used: directImageModel,
+      })}\n\n`);
+    }
+
+    const directImageResult = await tryGenerateImageForPrompt({
+      prompt: rawMessage,
+      intentText: rawMessage,
+      intentContext: imageIntentContext,
+      outputDir: path.join(getSessionWorkspacePath(normalizedSessionId), 'output', 'image-generations'),
+    });
+    if (directImageResult) {
+      assertSessionInterruptionEpoch(normalizedSessionId, sessionInterruptionEpoch);
+      db.updateMessage(assistantMsgId, directImageResult.content, directImageResult.modelUsed, directImageResult.processContent);
+      res.write(`data: ${JSON.stringify({
+        type: 'final',
+        text: directImageResult.content,
+        process_content: directImageResult.processContent,
+        process_streaming: false,
+        modelUsed: directImageResult.modelUsed,
+        model_used: directImageResult.modelUsed,
+      })}\n\n`);
+      res.end();
+      return;
+    }
+
+    if (runtimeSettings.runtimeMode === 'direct') {
+      await runDirectChatCompletion({
+        sessionId: normalizedSessionId,
+        agentId,
+        userMessageId: userMsgId,
+        assistantMessageId: assistantMsgId,
+        message: finalMessage,
+        modelUsed,
+        response: res,
+        processStartTag: sessionInfo?.process_start_tag || undefined,
+        processEndTag: sessionInfo?.process_end_tag || undefined,
+        sessionInterruptionEpoch,
+      });
+      return;
+    }
+
     pendingChatPreparationManager.start({
       sessionId: normalizedSessionId,
       epoch: sessionInterruptionEpoch,
@@ -8768,16 +10817,25 @@ app.post('/api/chat', async (req, res) => {
     });
 
     const client = await getConnection(normalizedSessionId);
+    sessionEventsClient = client;
     assertSessionInterruptionEpoch(normalizedSessionId, sessionInterruptionEpoch);
-    const outgoingMessage = await prepareOutgoingMessage(finalMessage, agentId);
+    const expectedSessionKey = buildOpenClawChatSessionKey(normalizedSessionId, agentId);
+    await abortOpenClawSessionRuns(client, expectedSessionKey, `session ${normalizedSessionId} before send`);
+    assertSessionInterruptionEpoch(normalizedSessionId, sessionInterruptionEpoch);
+    try {
+      await client.subscribeSessionEvents();
+      sessionEventsSubscribed = true;
+    } catch (error) {
+      console.warn(`[chat] Failed to subscribe session events for session ${normalizedSessionId}:`, error);
+    }
+    const outgoingMessage = await prepareOutgoingMessage(finalMessage, agentId, {
+      includeDocumentToolingContext: runtimeSettings.toolMode === 'full' || runtimeSettings.toolMode === 'coding',
+    });
     assertSessionInterruptionEpoch(normalizedSessionId, sessionInterruptionEpoch);
 
-    const expectedSessionKey = normalizedSessionId.startsWith('agent:')
-      ? normalizedSessionId
-      : `agent:${agentId}:chat:${normalizedSessionId}`;
     const preRunHistorySnapshot = await client.getChatHistory(expectedSessionKey, CHAT_HISTORY_COMPLETION_PROBE_LIMIT)
       .then((history) => getHistorySnapshot(history))
-      .catch(() => ({ length: 0, latestSignature: '' }));
+      .catch(() => getUnknownHistorySnapshot());
     assertSessionInterruptionEpoch(normalizedSessionId, sessionInterruptionEpoch);
 
     const { runId, sessionKey: finalSessionKey } = await client.sendChatMessageStreaming({
@@ -8788,8 +10846,17 @@ app.post('/api/chat', async (req, res) => {
     });
     if (getSessionInterruptionEpoch(normalizedSessionId) !== sessionInterruptionEpoch) {
       try {
-        await client.abortChat({ sessionKey: finalSessionKey, runId });
-      } catch {}
+        const abortResult = await client.abortChat({
+          sessionKey: finalSessionKey,
+          runId,
+          timeoutMs: CHAT_ORPHAN_ABORT_TIMEOUT_MS,
+        });
+        if (!abortResult.aborted) {
+          scheduleOpenClawSessionAbortRetry(client, finalSessionKey, `interrupted session ${normalizedSessionId}`);
+        }
+      } catch {
+        scheduleOpenClawSessionAbortRetry(client, finalSessionKey, `interrupted session ${normalizedSessionId}`);
+      }
       throw new SessionInterruptedError(normalizedSessionId);
     }
 
@@ -8803,8 +10870,12 @@ app.post('/api/chat', async (req, res) => {
       getSessionWorkspacePath(normalizedSessionId),
       client,
       finalSessionKey,
-      preRunHistorySnapshot
+      preRunHistorySnapshot,
+      sessionInfo?.process_start_tag || undefined,
+      sessionInfo?.process_end_tag || undefined,
+      sessionEventsSubscribed
     );
+    sessionEventsSubscribed = false;
     const pendingClients = pendingChatPreparationManager.promoteClients(normalizedSessionId, sessionInterruptionEpoch);
     pendingPreparationActive = false;
     pendingClients.forEach((clientRes) => {
@@ -8812,6 +10883,12 @@ app.post('/api/chat', async (req, res) => {
     });
 
   } catch (error: any) {
+    if (sessionEventsSubscribed && sessionEventsClient) {
+      sessionEventsSubscribed = false;
+      void sessionEventsClient.unsubscribeSessionEvents().catch((unsubscribeError) => {
+        console.warn(`[chat] Failed to unsubscribe session events for session ${normalizedSessionId}:`, unsubscribeError);
+      });
+    }
     const resetInterrupted = error instanceof SessionInterruptedError || getSessionInterruptionEpoch(normalizedSessionId) !== sessionInterruptionEpoch;
     if (resetInterrupted) {
       if (pendingPreparationActive) {
@@ -8897,6 +10974,8 @@ app.post('/api/chat/regenerate', async (req, res) => {
 
   let assistantMsgId: number | undefined;
   let pendingPreparationActive = false;
+  let sessionEventsClient: OpenClawClient | null = null;
+  let sessionEventsSubscribed = false;
 
   try {
     const requestedParentId = Number(parentId);
@@ -8939,19 +11018,19 @@ app.post('/api/chat/regenerate', async (req, res) => {
     }
 
     const sessionInfo = sessionManager.getSession(sessionId);
-    let finalMessage = String(message);
+    const rawMessage = String(message);
+    let finalMessage = rawMessage;
     let injectedInstructions = '';
 
     if (sessionInfo) {
-      const history = db.getMessages(sessionId, 1);
-      if (history.length === 0 && sessionInfo.prompt) {
-        injectedInstructions += `${sessionInfo.prompt}\n\n`;
-      }
       if (sessionInfo.process_start_tag && sessionInfo.process_end_tag) {
         injectedInstructions += `【极其重要：输出格式规范】\n当前启用了结构化思考输出。你关于后续任务决断的所有内部思考、分析或工作执行过程，必须严格包裹在 ${sessionInfo.process_start_tag} 和 ${sessionInfo.process_end_tag} 之间！\n真正的最终沟通、回复语言写在标签外部。\n\n`;
       }
     }
-    if (readMaxPermissionsEnabled() === true) {
+    const agentId = sessionInfo?.agentId || 'main';
+    const runtimeSettings = readEffectiveAgentRuntimeSettings(sessionInfo, agentId);
+
+    if (shouldInjectHostTakeoverInstruction(sessionInfo, agentId)) {
       injectedInstructions += `${buildHostTakeoverChatInstruction()}\n\n`;
     }
 
@@ -8959,12 +11038,14 @@ app.post('/api/chat/regenerate', async (req, res) => {
       finalMessage = `${injectedInstructions}${finalMessage}`;
     }
 
-    const agentId = sessionInfo?.agentId || 'main';
-
     const allCharacters = db.getCharacters();
     const character = allCharacters.find(c => c.agentId === agentId);
     const agentName = sessionInfo?.name || character?.name || agentId;
-    const modelUsed = agentProvisioner.readAgentModel(agentId) ||
+    const imageIntentContext = readAgentBootstrapIntentContext(agentId);
+    const directImageModel = shouldUseConfiguredImageGenerationModel(rawMessage, imageIntentContext)
+      ? getConfiguredDirectImageGenerationModel()
+      : null;
+    const modelUsed = directImageModel || agentProvisioner.readAgentModel(agentId) ||
       agentProvisioner.readAvailableModels().find(m => m.primary)?.id || '';
 
     assistantMsgId = Number(db.saveMessage({
@@ -8987,6 +11068,56 @@ app.post('/api/chat/regenerate', async (req, res) => {
     res.write(':' + Array(2048).fill(' ').join('') + '\n\n');
     res.write(`data: ${JSON.stringify({ type: 'ids', userMsgId: numericParentId, assistantMsgId })}\n\n`);
 
+    if (directImageModel) {
+      const startProcessContent = buildImageGenerationStartProcessContent(directImageModel);
+      db.updateMessage(assistantMsgId, '', directImageModel, startProcessContent);
+      res.write(`data: ${JSON.stringify({
+        type: 'delta',
+        text: '',
+        process_content: startProcessContent,
+        process_streaming: true,
+        modelUsed: directImageModel,
+        model_used: directImageModel,
+      })}\n\n`);
+    }
+
+    const directImageResult = await tryGenerateImageForPrompt({
+      prompt: rawMessage,
+      intentText: rawMessage,
+      intentContext: imageIntentContext,
+      outputDir: path.join(getSessionWorkspacePath(String(sessionId)), 'output', 'image-generations'),
+    });
+    if (directImageResult) {
+      assertSessionInterruptionEpoch(sessionId, sessionInterruptionEpoch);
+      db.updateMessage(assistantMsgId, directImageResult.content, directImageResult.modelUsed, directImageResult.processContent);
+      res.write(`data: ${JSON.stringify({
+        type: 'final',
+        text: directImageResult.content,
+        process_content: directImageResult.processContent,
+        process_streaming: false,
+        modelUsed: directImageResult.modelUsed,
+        model_used: directImageResult.modelUsed,
+      })}\n\n`);
+      res.end();
+      return;
+    }
+
+    if (runtimeSettings.runtimeMode === 'direct') {
+      await runDirectChatCompletion({
+        sessionId: String(sessionId),
+        agentId,
+        userMessageId: numericParentId,
+        assistantMessageId: assistantMsgId,
+        message: finalMessage,
+        modelUsed,
+        response: res,
+        processStartTag: sessionInfo?.process_start_tag || undefined,
+        processEndTag: sessionInfo?.process_end_tag || undefined,
+        sessionInterruptionEpoch,
+      });
+      return;
+    }
+
     pendingChatPreparationManager.start({
       sessionId,
       epoch: sessionInterruptionEpoch,
@@ -9003,15 +11134,25 @@ app.post('/api/chat/regenerate', async (req, res) => {
     });
 
     const client = await getConnection(sessionId);
+    sessionEventsClient = client;
     assertSessionInterruptionEpoch(sessionId, sessionInterruptionEpoch);
-    const outgoingMessage = await prepareOutgoingMessage(finalMessage, agentId);
+    const expectedSessionKey = buildOpenClawChatSessionKey(sessionId, agentId);
+    await abortOpenClawSessionRuns(client, expectedSessionKey, `session ${sessionId} before regenerate`);
     assertSessionInterruptionEpoch(sessionId, sessionInterruptionEpoch);
-    const expectedSessionKey = sessionId.startsWith('agent:')
-      ? sessionId
-      : `agent:${agentId}:chat:${sessionId}`;
+    try {
+      await client.subscribeSessionEvents();
+      sessionEventsSubscribed = true;
+    } catch (error) {
+      console.warn(`[chat] Failed to subscribe session events for session ${sessionId}:`, error);
+    }
+    const outgoingMessage = await prepareOutgoingMessage(finalMessage, agentId, {
+      includeDocumentToolingContext: runtimeSettings.toolMode === 'full' || runtimeSettings.toolMode === 'coding',
+    });
+    assertSessionInterruptionEpoch(sessionId, sessionInterruptionEpoch);
+
     const preRunHistorySnapshot = await client.getChatHistory(expectedSessionKey, CHAT_HISTORY_COMPLETION_PROBE_LIMIT)
       .then((history) => getHistorySnapshot(history))
-      .catch(() => ({ length: 0, latestSignature: '' }));
+      .catch(() => getUnknownHistorySnapshot());
     assertSessionInterruptionEpoch(sessionId, sessionInterruptionEpoch);
 
     const { runId, sessionKey: finalSessionKey } = await client.sendChatMessageStreaming({
@@ -9022,8 +11163,17 @@ app.post('/api/chat/regenerate', async (req, res) => {
     });
     if (getSessionInterruptionEpoch(sessionId) !== sessionInterruptionEpoch) {
       try {
-        await client.abortChat({ sessionKey: finalSessionKey, runId });
-      } catch {}
+        const abortResult = await client.abortChat({
+          sessionKey: finalSessionKey,
+          runId,
+          timeoutMs: CHAT_ORPHAN_ABORT_TIMEOUT_MS,
+        });
+        if (!abortResult.aborted) {
+          scheduleOpenClawSessionAbortRetry(client, finalSessionKey, `interrupted session ${sessionId}`);
+        }
+      } catch {
+        scheduleOpenClawSessionAbortRetry(client, finalSessionKey, `interrupted session ${sessionId}`);
+      }
       throw new SessionInterruptedError(sessionId);
     }
 
@@ -9037,8 +11187,12 @@ app.post('/api/chat/regenerate', async (req, res) => {
       getSessionWorkspacePath(sessionId),
       client,
       finalSessionKey,
-      preRunHistorySnapshot
+      preRunHistorySnapshot,
+      sessionInfo?.process_start_tag || undefined,
+      sessionInfo?.process_end_tag || undefined,
+      sessionEventsSubscribed
     );
+    sessionEventsSubscribed = false;
 
     const pendingClients = pendingChatPreparationManager.promoteClients(sessionId, sessionInterruptionEpoch);
     pendingPreparationActive = false;
@@ -9047,6 +11201,12 @@ app.post('/api/chat/regenerate', async (req, res) => {
     });
 
   } catch (error: any) {
+    if (sessionEventsSubscribed && sessionEventsClient) {
+      sessionEventsSubscribed = false;
+      void sessionEventsClient.unsubscribeSessionEvents().catch((unsubscribeError) => {
+        console.warn(`[chat] Failed to unsubscribe session events for session ${sessionId}:`, unsubscribeError);
+      });
+    }
     const resetInterrupted = error instanceof SessionInterruptedError || getSessionInterruptionEpoch(sessionId) !== sessionInterruptionEpoch;
     if (resetInterrupted) {
       if (pendingPreparationActive) {
@@ -9167,8 +11327,26 @@ app.post('/api/chat/stop', async (req, res) => {
     bumpSessionInterruptionEpoch(normalizedSessionId);
     pendingChatPreparationManager.cancel(normalizedSessionId, interruptedEpoch);
     const result = await activeRunManager.abortRun(normalizedSessionId);
+    let orphanAbortResult: { aborted: boolean; runIds: string[] } = { aborted: false, runIds: [] };
+    try {
+      const sessionInfo = sessionManager.getSession(normalizedSessionId);
+      const agentId = sessionInfo?.agentId || 'main';
+      const client = await getConnection(normalizedSessionId);
+      orphanAbortResult = await abortOpenClawSessionRuns(
+        client,
+        buildOpenClawChatSessionKey(normalizedSessionId, agentId),
+        `session ${normalizedSessionId} stop`,
+        { retryOnMiss: true },
+      );
+    } catch (error) {
+      console.warn(`[chat] Failed to abort orphan OpenClaw runs while stopping session ${normalizedSessionId}:`, error);
+    }
     await reconcileInactiveChatLatestMessage(normalizedSessionId);
-    res.json({ success: true, ...result });
+    res.json({
+      success: true,
+      aborted: result.aborted || orphanAbortResult.aborted,
+      runIds: orphanAbortResult.runIds,
+    });
   } catch (error: any) {
     res.status(500).json(buildStructuredChatHttpError(error?.message || 'Failed to stop chat run.'));
   }
@@ -9671,7 +11849,13 @@ const groupChatEngine = new GroupChatEngine(db, getConnection, (agentId) => {
 }, () => {
   const configuredLanguage = configManager.getConfig().language;
   return configuredLanguage === 'zh-TW' || configuredLanguage === 'en' ? configuredLanguage : 'zh-CN';
-}, prepareGroupRuntimeAgent);
+}, prepareGroupRuntimeAgent, tryGenerateImageForPrompt, () => {
+  const modelId = getConfiguredDirectImageGenerationModel();
+  return modelId ? buildImageGenerationStartProcessContent(modelId) : null;
+}, (agentId) => {
+  const sessionInfo = db.getSessionByAgentId(agentId) || db.getSession(agentId);
+  return shouldInjectHostTakeoverInstruction(sessionInfo, agentId);
+});
 
 // SSE clients per group
 const groupSSEClients = new Map<string, Set<express.Response>>();
@@ -10294,6 +12478,7 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
 const PORT = Number(process.env.PORT) || 3100;
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`ClawUI backend listening on http://0.0.0.0:${PORT}`);
+  scheduleOpenClawImageProviderCacheRefresh('startup');
   if (consumeBrowserWarmupRequest()) {
     console.log('[BrowserWarmup] Scheduling deferred browser warmup after restart.');
     void scheduleDeferredBrowserWarmup();
