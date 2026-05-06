@@ -45,6 +45,7 @@ export type ChatRow = {
   session_key: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
+  process_content?: string | null;
   model_used?: string;
   agent_id?: string;
   agent_name?: string;
@@ -69,10 +70,13 @@ export type MessageSearchMatch = {
   anchorBeforeId: number | null;
 };
 
+export type AgentRuntimeMode = 'configured' | 'direct';
+export type AgentSystemPromptMode = 'system' | 'agent';
+export type AgentToolMode = 'full' | 'coding' | 'messaging' | 'minimal' | 'off';
+
 export type SessionRow = {
   id: string;
   name: string;
-  prompt?: string;
   agentId: string;
   characterId?: string;
   position: number;
@@ -80,6 +84,9 @@ export type SessionRow = {
   updated_at: number;
   process_start_tag?: string;
   process_end_tag?: string;
+  runtime_mode?: AgentRuntimeMode;
+  system_prompt_mode?: AgentSystemPromptMode;
+  tool_mode?: AgentToolMode;
 };
 
 export type CharacterRow = {
@@ -102,6 +109,15 @@ export type StoredFileRow = {
   created_at?: string;
 };
 
+export type CapabilityCacheRow = {
+  key: string;
+  value: string;
+  openclaw_version?: string | null;
+  status: 'success' | 'error';
+  error_detail?: string | null;
+  updated_at?: string;
+};
+
 export class DB {
   private db: Database.Database;
 
@@ -121,12 +137,22 @@ export class DB {
         value TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS openclaw_capability_cache (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL DEFAULT '{}',
+        openclaw_version TEXT,
+        status TEXT NOT NULL DEFAULT 'success',
+        error_detail TEXT,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+
       CREATE TABLE IF NOT EXISTS chat_messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         parent_id INTEGER REFERENCES chat_messages(id),
         session_key TEXT NOT NULL,
         role TEXT NOT NULL,
         content TEXT NOT NULL,
+        process_content TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       );
 
@@ -151,10 +177,12 @@ export class DB {
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
         description TEXT,
-        prompt TEXT,
         agentId TEXT NOT NULL,
         characterId TEXT,
         position INTEGER DEFAULT 0,
+        runtime_mode TEXT DEFAULT 'configured',
+        system_prompt_mode TEXT DEFAULT 'system',
+        tool_mode TEXT DEFAULT 'full',
         created_at DATETIME NOT NULL,
         updated_at DATETIME NOT NULL
       );
@@ -256,10 +284,6 @@ export class DB {
     } catch (e: any) {}
     
     try {
-      this.db.exec("ALTER TABLE sessions ADD COLUMN prompt TEXT");
-    } catch (e: any) {}
-
-    try {
       this.db.exec("ALTER TABLE sessions ADD COLUMN position INTEGER DEFAULT 0");
     } catch (e: any) {}
 
@@ -268,6 +292,15 @@ export class DB {
     } catch (e: any) {}
     try {
       this.db.exec("ALTER TABLE sessions ADD COLUMN process_end_tag TEXT DEFAULT ''");
+    } catch (e: any) {}
+    try {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN runtime_mode TEXT DEFAULT 'configured'");
+    } catch (e: any) {}
+    try {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN system_prompt_mode TEXT DEFAULT 'system'");
+    } catch (e: any) {}
+    try {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN tool_mode TEXT DEFAULT 'full'");
     } catch (e: any) {}
 
     try {
@@ -279,6 +312,7 @@ export class DB {
     try { this.db.exec("ALTER TABLE chat_messages ADD COLUMN agent_id TEXT"); } catch (e: any) {}
     try { this.db.exec("ALTER TABLE chat_messages ADD COLUMN agent_name TEXT"); } catch (e: any) {}
     try { this.db.exec("ALTER TABLE chat_messages ADD COLUMN parent_id INTEGER REFERENCES chat_messages(id)"); } catch (e: any) {}
+    try { this.db.exec("ALTER TABLE chat_messages ADD COLUMN process_content TEXT"); } catch (e: any) {}
 
     // Group message upgrades
     try { this.db.exec("ALTER TABLE group_messages ADD COLUMN model_used TEXT"); } catch (e: any) {}
@@ -317,14 +351,69 @@ export class DB {
       .run(key, value);
   }
 
+  getCapabilityCache(key: string): CapabilityCacheRow | undefined {
+    return this.db
+      .prepare('SELECT key, value, openclaw_version, status, error_detail, updated_at FROM openclaw_capability_cache WHERE key = ?')
+      .get(key) as CapabilityCacheRow | undefined;
+  }
+
+  upsertCapabilityCache(row: {
+    key: string;
+    value: string;
+    openclawVersion?: string | null;
+    status?: 'success' | 'error';
+    errorDetail?: string | null;
+  }) {
+    this.db
+      .prepare(`
+        INSERT INTO openclaw_capability_cache (key, value, openclaw_version, status, error_detail, updated_at)
+        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(key) DO UPDATE SET
+          value = excluded.value,
+          openclaw_version = excluded.openclaw_version,
+          status = excluded.status,
+          error_detail = excluded.error_detail,
+          updated_at = CURRENT_TIMESTAMP
+      `)
+      .run(
+        row.key,
+        row.value,
+        row.openclawVersion || null,
+        row.status || 'success',
+        row.errorDetail || null,
+      );
+  }
+
+  markCapabilityCacheError(key: string, errorDetail: string, openclawVersion?: string | null) {
+    const existing = this.getCapabilityCache(key);
+    this.db
+      .prepare(`
+        INSERT INTO openclaw_capability_cache (key, value, openclaw_version, status, error_detail, updated_at)
+        VALUES (?, ?, ?, 'error', ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(key) DO UPDATE SET
+          openclaw_version = COALESCE(excluded.openclaw_version, openclaw_capability_cache.openclaw_version),
+          status = excluded.status,
+          error_detail = excluded.error_detail,
+          updated_at = CURRENT_TIMESTAMP
+      `)
+      .run(key, existing?.value || '{}', openclawVersion || null, errorDetail);
+  }
+
   saveMessage(row: ChatRow): number | bigint {
     const result = this.db
-      .prepare('INSERT INTO chat_messages (session_key, parent_id, role, content, model_used, agent_id, agent_name) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(row.session_key, row.parent_id || null, row.role, row.content, row.model_used || null, row.agent_id || null, row.agent_name || null);
+      .prepare('INSERT INTO chat_messages (session_key, parent_id, role, content, process_content, model_used, agent_id, agent_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(row.session_key, row.parent_id || null, row.role, row.content, row.process_content || null, row.model_used || null, row.agent_id || null, row.agent_name || null);
     return result.lastInsertRowid;
   }
 
-  updateMessage(id: number, content: string, modelUsed?: string) {
+  updateMessage(id: number, content: string, modelUsed?: string, processContent?: string | null) {
+    if (processContent !== undefined) {
+      this.db
+        .prepare('UPDATE chat_messages SET content = ?, process_content = ?, model_used = ? WHERE id = ?')
+        .run(content, processContent || null, modelUsed || null, id);
+      return;
+    }
+
     this.db
       .prepare('UPDATE chat_messages SET content = ?, model_used = ? WHERE id = ?')
       .run(content, modelUsed || null, id);
@@ -437,7 +526,7 @@ export class DB {
             ${
               options.table === 'group_messages'
                 ? "coalesce(current_message.content, '') || '\n' || coalesce(current_message.process_content, '')"
-                : "coalesce(current_message.content, '')"
+                : "coalesce(current_message.content, '') || '\n' || coalesce(current_message.process_content, '')"
             }
           ),
           lower(?)
@@ -461,7 +550,7 @@ export class DB {
       table: 'chat_messages',
       scopeColumn: 'session_key',
       scopeValue: sessionKey,
-      selectSql: "id, parent_id, session_key, role, content, model_used, agent_id, agent_name, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) as created_at",
+      selectSql: "id, parent_id, session_key, role, content, process_content, model_used, agent_id, agent_name, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) as created_at",
       beforeId: options.beforeId,
       limit: options.limit ?? 1000,
     });
@@ -526,20 +615,33 @@ export class DB {
   // --- Sessions ---
   saveSession(session: SessionRow) {
     this.db
-      .prepare('INSERT INTO sessions (id, name, prompt, agentId, characterId, position, created_at, updated_at, process_start_tag, process_end_tag) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, prompt=excluded.prompt, agentId=excluded.agentId, characterId=excluded.characterId, position=excluded.position, updated_at=excluded.updated_at, process_start_tag=excluded.process_start_tag, process_end_tag=excluded.process_end_tag')
-      .run(session.id, session.name, session.prompt || null, session.agentId, session.characterId || null, session.position, session.created_at, session.updated_at, session.process_start_tag || '', session.process_end_tag || '');
+      .prepare('INSERT INTO sessions (id, name, agentId, characterId, position, created_at, updated_at, process_start_tag, process_end_tag, runtime_mode, system_prompt_mode, tool_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, agentId=excluded.agentId, characterId=excluded.characterId, position=excluded.position, updated_at=excluded.updated_at, process_start_tag=excluded.process_start_tag, process_end_tag=excluded.process_end_tag, runtime_mode=excluded.runtime_mode, system_prompt_mode=excluded.system_prompt_mode, tool_mode=excluded.tool_mode')
+      .run(
+        session.id,
+        session.name,
+        session.agentId,
+        session.characterId || null,
+        session.position,
+        session.created_at,
+        session.updated_at,
+        session.process_start_tag || '',
+        session.process_end_tag || '',
+        session.runtime_mode || 'configured',
+        session.system_prompt_mode || 'system',
+        session.tool_mode || 'full',
+      );
   }
 
   getSession(id: string): SessionRow | undefined {
-    return this.db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as SessionRow | undefined;
+    return this.db.prepare('SELECT id, name, agentId, characterId, position, created_at, updated_at, process_start_tag, process_end_tag, runtime_mode, system_prompt_mode, tool_mode FROM sessions WHERE id = ?').get(id) as SessionRow | undefined;
   }
 
   getSessionByAgentId(agentId: string): SessionRow | undefined {
-    return this.db.prepare('SELECT * FROM sessions WHERE agentId = ? ORDER BY updated_at DESC LIMIT 1').get(agentId) as SessionRow | undefined;
+    return this.db.prepare('SELECT id, name, agentId, characterId, position, created_at, updated_at, process_start_tag, process_end_tag, runtime_mode, system_prompt_mode, tool_mode FROM sessions WHERE agentId = ? ORDER BY updated_at DESC LIMIT 1').get(agentId) as SessionRow | undefined;
   }
 
   getSessions(): SessionRow[] {
-    return this.db.prepare('SELECT * FROM sessions ORDER BY position ASC, updated_at DESC').all() as SessionRow[];
+    return this.db.prepare('SELECT id, name, agentId, characterId, position, created_at, updated_at, process_start_tag, process_end_tag, runtime_mode, system_prompt_mode, tool_mode FROM sessions ORDER BY position ASC, updated_at DESC').all() as SessionRow[];
   }
 
   updateSessionPositions(orders: { id: string; position: number }[]) {
