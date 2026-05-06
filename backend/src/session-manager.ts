@@ -1,13 +1,15 @@
 import { EventEmitter } from 'events';
-import type { DB, SessionRow } from './db';
+import type { AgentRuntimeMode, AgentSystemPromptMode, AgentToolMode, DB, SessionRow } from './db';
 
 interface CreateSessionOptions {
   name?: string;
-  prompt?: string;
   agentId?: string;
   id?: string;
   process_start_tag?: string;
   process_end_tag?: string;
+  runtime_mode?: AgentRuntimeMode;
+  system_prompt_mode?: AgentSystemPromptMode;
+  tool_mode?: AgentToolMode;
 }
 
 export class SessionManager extends EventEmitter {
@@ -45,20 +47,20 @@ export class SessionManager extends EventEmitter {
     const maxPos = allSessions.length > 0 ? Math.max(...allSessions.map(s => s.position || 0)) : -1;
     const position = maxPos + 1;
 
-    // Auto-resolve agentId
     let finalAgentId = options.agentId || id;
-    let finalPrompt = options.prompt;
 
     const session: SessionRow = {
       id,
       name,
-      prompt: finalPrompt,
       agentId: finalAgentId,
       position,
       created_at: now,
       updated_at: now,
       process_start_tag: options.process_start_tag || '',
       process_end_tag: options.process_end_tag || '',
+      runtime_mode: options.runtime_mode || 'configured',
+      system_prompt_mode: options.system_prompt_mode || 'system',
+      tool_mode: options.tool_mode || 'full',
     };
     
     this.db.saveSession(session);
