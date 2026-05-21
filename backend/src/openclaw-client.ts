@@ -1,6 +1,8 @@
 import WebSocket from 'ws';
 import { EventEmitter } from 'events';
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
 
 const CHAT_SEND_START_TIMEOUT_MS = 5 * 60 * 1000;
 const CHAT_HISTORY_TIMEOUT_MS = 90 * 1000;
@@ -243,10 +245,32 @@ export class OpenClawClient extends EventEmitter {
   private pending = new Map<string, Pending>();
   private connectPromise: Promise<void> | null = null;
   private sessionEventSubscriptionRefs = 0;
+  private deviceId: string;
+
+  private loadDeviceId(): string {
+  const file = path.join(process.cwd(), '.openclaw-device-id');
+
+  try {
+
+    if (fs.existsSync(file)) {
+      return fs.readFileSync(file, 'utf8').trim();
+    }
+
+    const id = crypto.randomUUID();
+
+    fs.writeFileSync(file, id);
+
+    return id;
+
+  } catch {
+    return crypto.randomUUID();
+  }
+}
 
   constructor(config: OpenClawConfig) {
     super();
     this.config = config;
+    this.deviceId = this.loadDeviceId();
   }
 
   private hasOpenSocket(): boolean {
@@ -310,37 +334,68 @@ export class OpenClawClient extends EventEmitter {
       this.ws.on('message', async (data) => {
         try {
           const msg = JSON.parse(data.toString());
+          console.log(JSON.stringify(msg, null, 2));
 
           // challenge from gateway
           if (msg.type === 'event' && msg.event === 'connect.challenge') {
             try {
+              const nonce = crypto.randomBytes(16).toString('hex');
+              const signedAt = Date.now();
+
+              const publicKey = crypto
+                .createHash('sha256')
+                .update(this.deviceId)
+                .digest('hex');
+
+              const signature = crypto
+                .createHmac('sha256', this.config.token || 'openclaw')
+                .update(`${this.deviceId}:${nonce}:${signedAt}`)
+                .digest('hex');
+
               await this.request('connect', {
-                minProtocol: 3,
-                maxProtocol: 3,
+                minProtocol: 4,
+                maxProtocol: 4,
+
                 client: {
                   id: 'openclaw-control-ui',
-                  version: 'clawui-backend',
+                  version: '1.0.0',
                   mode: 'webchat',
                   platform: process.platform,
                 },
-                caps: ['tool-events'],
+
+                device: {
+                  id: this.deviceId,
+                  publicKey,
+                  signature,
+                  signedAt,
+                  nonce,
+                },
+
                 auth: {
                   token: this.config.token,
                   password: this.config.password,
                 },
+
                 role: 'operator',
-                scopes: ['operator.admin', 'operator.write', 'operator.read'],
+                scopes: [
+                  'operator.read',
+                  'operator.write',
+                ],
               });
 
-              this.connected = true;
-              this.connectPromise = null;
-              this.emit('connected');
-              resolveOnce();
-            } catch (err: any) {
-              fail(new Error(err?.message || 'Gateway connect failed'));
-            }
-            return;
-          }
+
+    this.connected = true;
+    this.connectPromise = null;
+    this.emit('connected');
+
+    resolveOnce();
+
+  } catch (err: any) {
+    fail(new Error(err?.message || 'Gateway connect failed'));
+  }
+
+  return;
+}
 
           // response frame
           if (msg.type === 'res' && msg.id) {
