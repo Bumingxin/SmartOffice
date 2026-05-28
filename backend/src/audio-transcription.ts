@@ -311,12 +311,21 @@ async function inspectLocalAudioBackendWithPython(pythonCommand: string): Promis
   return null;
 }
 
+async function findOpenClawDistFile(pattern: RegExp): Promise<string> {
+  const files = fs.readdirSync(OPENCLAW_DIST_DIR);
+  const match = files.find((file) => pattern.test(file));
+  if (!match) {
+    throw new Error(`No file matching ${pattern} found in ${OPENCLAW_DIST_DIR}`);
+  }
+  return path.join(OPENCLAW_DIST_DIR, match);
+}
+
 async function loadAudioModules(): Promise<LoadedAudioModules> {
   if (!loadedAudioModulesPromise) {
     loadedAudioModulesPromise = Promise.all([
-      importOpenClawModule<OpenClawRuntimeModule>(path.join(OPENCLAW_DIST_DIR, 'runtime-BAhPozfv.js')),
-      importOpenClawModule<OpenClawEntryCapabilitiesModule>(path.join(OPENCLAW_DIST_DIR, 'entry-capabilities-BkYBkUwC.js')),
-      importOpenClawModule<OpenClawModelAuthModule>(path.join(OPENCLAW_DIST_DIR, 'model-auth-RU1Lwgn8.js')),
+      findOpenClawDistFile(/^runtime-[^.]+\.js$/).then((filePath) => importOpenClawModule<OpenClawRuntimeModule>(filePath)),
+      findOpenClawDistFile(/^entry-capabilities-[^.]+\.js$/).then((filePath) => importOpenClawModule<OpenClawEntryCapabilitiesModule>(filePath)),
+      findOpenClawDistFile(/^model-auth-[^.]+\.js$/).then((filePath) => importOpenClawModule<OpenClawModelAuthModule>(filePath)),
     ]).then(([runtime, entryCapabilities, modelAuth]) => ({
       runtime,
       entryCapabilities,
