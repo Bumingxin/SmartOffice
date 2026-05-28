@@ -12,6 +12,16 @@ interface Config {
   allowedHosts?: string[];
   historyPageRounds?: number;
   previewConversionTimeoutSeconds?: number;
+  audioTranscription?: {
+    defaultProvider?: 'local' | 'siliconflow' | 'openclaw';
+    fallbackProviders?: Array<'local' | 'siliconflow' | 'openclaw'>;
+    localModel?: string;
+    localPythonPath?: string;
+    timeoutMs?: number;
+    enableOpenClawProvider?: boolean;
+    siliconFlowApiKey?: string;
+    siliconFlowModel?: string;
+  };
   sidebarFavorites?: {
     agents: string[];
     groups: string[];
@@ -121,6 +131,14 @@ const DEFAULT_CONFIG: Config = {
     groups: [],
     order: [],
   },
+  audioTranscription: {
+    defaultProvider: 'local',
+    fallbackProviders: ['siliconflow', 'openclaw'],
+    localModel: 'base',
+    timeoutMs: 900000,
+    enableOpenClawProvider: false,
+    siliconFlowModel: 'FunAudioLLM/SenseVoiceSmall',
+  },
 };
 
 export class ConfigManager {
@@ -151,6 +169,7 @@ export class ConfigManager {
         allowedHosts: normalizeStoredStringArray(merged.allowedHosts),
         historyPageRounds: normalizeHistoryPageRounds(merged.historyPageRounds),
         previewConversionTimeoutSeconds: normalizePreviewConversionTimeoutSeconds(merged.previewConversionTimeoutSeconds),
+        audioTranscription: merged.audioTranscription,
         sidebarFavorites: normalizeSidebarFavorites(merged.sidebarFavorites),
       };
     } catch {
