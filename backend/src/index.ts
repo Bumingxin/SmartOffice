@@ -11819,6 +11819,25 @@ app.use('/assets', express.static(path.join(__dirname, '../../frontend/dist/asse
   immutable: true,
 }));
 
+function isMobileBrowserRequest(req: express.Request): boolean {
+  const mobileClientHint = String(req.header('sec-ch-ua-mobile') || '').trim();
+  if (mobileClientHint === '?1') return true;
+
+  const userAgent = String(req.header('user-agent') || '');
+  return /Android|iPhone|iPad|iPod|Windows Phone|BlackBerry|IEMobile|Opera Mini|Mobile/i.test(userAgent);
+}
+
+function sendFrontendEntry(req: express.Request, res: express.Response) {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+
+  const entryFile = isMobileBrowserRequest(req) ? 'mobile.html' : 'index.html';
+  res.sendFile(path.join(__dirname, '../../frontend/dist', entryFile));
+}
+
+app.get('/', sendFrontendEntry);
+
 // Serve other static files (images, favicon, manifest, etc.) with short cache
 app.use(express.static(path.join(__dirname, '../../frontend/dist'), {
   maxAge: '1h',
@@ -11831,6 +11850,13 @@ app.use(express.static(path.join(__dirname, '../../frontend/dist'), {
     }
   },
 }));
+
+app.get(['/mobile', '/mobile/*'], (_req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  res.sendFile(path.join(__dirname, '../../frontend/dist/mobile.html'));
+});
 
 // ========== Group Chat Engine ==========
 const groupChatEngine = new GroupChatEngine(db, getConnection, (agentId) => {
@@ -12458,12 +12484,7 @@ app.get('/api/groups/:id/events', async (req, res) => {
 });
 
 // Fallback for SPA — also no-cache
-app.get('*', (_req, res) => {
-  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-  res.setHeader('Pragma', 'no-cache');
-  res.setHeader('Expires', '0');
-  res.sendFile(path.join(__dirname, '../../frontend/dist/index.html'));
-});
+app.get('*', sendFrontendEntry);
 
 // Error handling
 app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
