@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ChatMessage } from '../types';
 import { fetchJsonWithTimeout } from './useConnectionStatus';
 import { uploadMobileFiles } from './mobileApi';
+import { readJsonEventStream } from './streamEvents';
 
 function toChatMessage(raw: any): ChatMessage {
   return {
@@ -23,11 +24,18 @@ function getErrorMessage(error: unknown) {
 }
 
 export function useChatSession(sessionId: string) {
-  const abortControllerRef = useRef<AbortController | null>(null);
+  const sendControllerRef = useRef<AbortController | null>(null);
+  const attachControllerRef = useRef<AbortController | null>(null);
+  const messagesRef = useRef<ChatMessage[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [error, setError] = useState('');
+  const [attachAttempt, setAttachAttempt] = useState(0);
+
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
   const loadHistory = useCallback(async () => {
     if (!sessionId) return;
@@ -45,12 +53,145 @@ export function useChatSession(sessionId: string) {
 
   useEffect(() => {
     void loadHistory();
-    return () => abortControllerRef.current?.abort();
+    return () => {
+      sendControllerRef.current?.abort();
+      attachControllerRef.current?.abort();
+    };
   }, [loadHistory]);
 
+  const patchAssistantMessage = useCallback((messageId: string, patch: Partial<ChatMessage>) => {
+    setMessages((current) => current.map((message) => (
+      message.id === messageId ? { ...message, ...patch } : message
+    )));
+  }, []);
+
+  const resolveAttachMessageId = useCallback((rawMessageId: unknown) => {
+    if (rawMessageId !== null && rawMessageId !== undefined) return String(rawMessageId);
+    const latestAssistant = [...messagesRef.current].reverse().find((message) => message.role !== 'user');
+    return latestAssistant?.id || null;
+  }, []);
+
+  const recoverLatestIfBlank = useCallback(async () => {
+    const latestAssistant = [...messagesRef.current].reverse().find((message) => message.role !== 'user');
+    if (!latestAssistant || String(latestAssistant.content || latestAssistant.processContent || '').trim()) return;
+    try {
+      const data = await fetchJsonWithTimeout<{ messages?: any[] }>(`/api/history/${encodeURIComponent(sessionId)}?limit=80`);
+      setMessages((data.messages || []).map(toChatMessage));
+    } catch {
+      // History recovery is best-effort; the visible stream error path handles user-facing errors.
+    }
+  }, [sessionId]);
+
+  const applyStreamEvent = useCallback((
+    event: any,
+    state: { assistantId: string | null; userId?: string | null },
+  ) => {
+    if (event.type === 'ids') {
+      const realUserId = String(event.userMsgId);
+      const realAssistantId = String(event.assistantMsgId);
+      const previousUserId = state.userId;
+      const previousAssistantId = state.assistantId;
+
+      setMessages((current) => current.map((message) => {
+        if (previousUserId && message.id === previousUserId) return { ...message, id: realUserId };
+        if (previousAssistantId && message.id === previousAssistantId) {
+          return { ...message, id: realAssistantId, parentId: realUserId };
+        }
+        return message;
+      }));
+
+      state.userId = realUserId;
+      state.assistantId = realAssistantId;
+      return;
+    }
+
+    if (event.type === 'attached') {
+      state.assistantId = resolveAttachMessageId(event.messageId);
+      if (!state.assistantId) return;
+      patchAssistantMessage(state.assistantId, {
+        agentId: typeof event.agentId === 'string' ? event.agentId : undefined,
+        agentName: typeof event.agentName === 'string' ? event.agentName : undefined,
+        model: typeof event.modelUsed === 'string' ? event.modelUsed : undefined,
+      });
+      return;
+    }
+
+    if ((event.type === 'delta' || event.type === 'final') && state.assistantId) {
+      const patch: Partial<ChatMessage> = {
+        content: typeof event.text === 'string' ? event.text : '',
+      };
+      if (typeof event.process_content === 'string') patch.processContent = event.process_content;
+      if (typeof event.process_streaming === 'boolean') {
+        patch.processStreaming = event.process_streaming;
+      } else if (event.type === 'final') {
+        patch.processStreaming = false;
+      }
+      if (typeof event.modelUsed === 'string') {
+        patch.model = event.modelUsed;
+      } else if (typeof event.model_used === 'string') {
+        patch.model = event.model_used;
+      }
+      patchAssistantMessage(state.assistantId, patch);
+      return;
+    }
+
+    if (event.type === 'error') {
+      throw new Error(event.error || event.text || 'Chat request failed');
+    }
+  }, [patchAssistantMessage, resolveAttachMessageId]);
+
+  useEffect(() => {
+    if (!sessionId || isLoadingHistory || sendControllerRef.current) return;
+
+    attachControllerRef.current?.abort();
+    const controller = new AbortController();
+    attachControllerRef.current = controller;
+    const streamState: { assistantId: string | null } = { assistantId: null };
+
+    const attachActiveRun = async () => {
+      try {
+        const response = await fetch(`/api/chat/attach/${encodeURIComponent(sessionId)}`, {
+          signal: controller.signal,
+        });
+        const contentType = response.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+          await recoverLatestIfBlank();
+          return;
+        }
+        if (!response.ok || !response.body) return;
+
+        setIsSending(true);
+        await readJsonEventStream(response, (event) => applyStreamEvent(event, streamState));
+        await recoverLatestIfBlank();
+      } catch (err) {
+        if ((err as any)?.name !== 'AbortError') {
+          setError(getErrorMessage(err));
+        }
+      } finally {
+        if (attachControllerRef.current === controller) {
+          attachControllerRef.current = null;
+        }
+        if (!controller.signal.aborted) {
+          setIsSending(false);
+        }
+      }
+    };
+
+    void attachActiveRun();
+
+    return () => {
+      controller.abort();
+      if (attachControllerRef.current === controller) {
+        attachControllerRef.current = null;
+      }
+    };
+  }, [applyStreamEvent, attachAttempt, isLoadingHistory, recoverLatestIfBlank, sessionId]);
+
   const stop = useCallback(async () => {
-    abortControllerRef.current?.abort();
-    abortControllerRef.current = null;
+    sendControllerRef.current?.abort();
+    attachControllerRef.current?.abort();
+    sendControllerRef.current = null;
+    attachControllerRef.current = null;
     setIsSending(false);
     if (sessionId) {
       await fetchJsonWithTimeout<{ success?: boolean }>('/api/chat/stop', {
@@ -65,7 +206,8 @@ export function useChatSession(sessionId: string) {
     if (!sessionId || (!content.trim() && files.length === 0) || isSending) return;
 
     const controller = new AbortController();
-    abortControllerRef.current = controller;
+    attachControllerRef.current?.abort();
+    sendControllerRef.current = controller;
     setIsSending(true);
     setError('');
 
@@ -96,49 +238,12 @@ export function useChatSession(sessionId: string) {
         throw new Error(`HTTP ${response.status}`);
       }
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          const event = JSON.parse(line.slice(6));
-          if (event.type === 'ids') {
-            const realUserId = String(event.userMsgId);
-            const realAssistantId = String(event.assistantMsgId);
-            setMessages((current) => current.map((message) => {
-              if (message.id === resolvedUserId) return { ...message, id: realUserId };
-              if (message.id === resolvedAssistantId) return { ...message, id: realAssistantId, parentId: realUserId };
-              return message;
-            }));
-            resolvedUserId = realUserId;
-            resolvedAssistantId = realAssistantId;
-          }
-          if (event.type === 'delta' || event.type === 'final') {
-            setMessages((current) => current.map((message) => (
-              message.id === resolvedAssistantId
-                ? {
-                    ...message,
-                    content: typeof event.text === 'string' ? event.text : message.content,
-                    processContent: typeof event.process_content === 'string' ? event.process_content : message.processContent,
-                    processStreaming: event.type === 'final' ? false : event.process_streaming ?? message.processStreaming,
-                    model: event.modelUsed || event.model_used || message.model,
-                  }
-                : message
-            )));
-          }
-          if (event.type === 'error') {
-            throw new Error(event.error || 'Chat request failed');
-          }
-        }
-      }
+      const streamState = { assistantId: resolvedAssistantId, userId: resolvedUserId };
+      await readJsonEventStream(response, (event) => applyStreamEvent(event, streamState));
+      resolvedAssistantId = streamState.assistantId || resolvedAssistantId;
+      resolvedUserId = streamState.userId || resolvedUserId;
+      patchAssistantMessage(resolvedAssistantId, { processStreaming: false });
+      await recoverLatestIfBlank();
     } catch (err) {
       if ((err as any)?.name !== 'AbortError') {
         const message = getErrorMessage(err);
@@ -149,9 +254,12 @@ export function useChatSession(sessionId: string) {
       }
     } finally {
       setIsSending(false);
-      abortControllerRef.current = null;
+      if (sendControllerRef.current === controller) {
+        sendControllerRef.current = null;
+      }
+      setAttachAttempt((value) => value + 1);
     }
-  }, [isSending, sessionId]);
+  }, [applyStreamEvent, isSending, patchAssistantMessage, recoverLatestIfBlank, sessionId]);
 
   return { messages, isLoadingHistory, isSending, error, loadHistory, sendMessage, stop };
 }

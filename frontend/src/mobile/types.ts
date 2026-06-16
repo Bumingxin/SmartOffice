@@ -24,6 +24,9 @@ export interface ChatMessage {
   agentId?: string;
   agentName?: string;
   parentId?: string;
+  messageCode?: string;
+  messageParams?: Record<string, unknown>;
+  rawDetail?: string;
 }
 
 export interface GroupMember {
