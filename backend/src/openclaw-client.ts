@@ -1,4 +1,4 @@
-import WebSocket from 'ws';
+﻿import WebSocket from 'ws';
 import { EventEmitter } from 'events';
 import crypto from 'crypto';
 import fs from 'fs';
@@ -29,6 +29,159 @@ type SessionToolEventPayload = {
   data?: any;
   session?: any;
 };
+
+// ── Ed25519 device identity helpers (OpenClaw 2026.6+) ──
+
+const ED25519_SPKI_PREFIX = Buffer.from([0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00]);
+const ED25519_PKCS8_PREFIX = Buffer.from([0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20]);
+
+function base64UrlEncode(buf: Buffer): string {
+  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function extractRawPublicKey(spkiDer: Buffer): Buffer {
+  return spkiDer.subarray(ED25519_SPKI_PREFIX.length);
+}
+
+function extractRawPrivateKey(pkcs8Der: Buffer): Buffer {
+  return pkcs8Der.subarray(ED25519_PKCS8_PREFIX.length);
+}
+
+function buildRawPublicKey(rawPub: Buffer): crypto.KeyObject {
+  const spkiDer = Buffer.concat([ED25519_SPKI_PREFIX, rawPub]);
+  return crypto.createPublicKey({ key: spkiDer, format: 'der', type: 'spki' });
+}
+
+function buildRawPrivateKey(rawPriv: Buffer): crypto.KeyObject {
+  const pkcs8Der = Buffer.concat([ED25519_PKCS8_PREFIX, rawPriv]);
+  return crypto.createPrivateKey({ key: pkcs8Der, format: 'der', type: 'pkcs8' });
+}
+
+function ed25519Sign(payload: string, privateKey: crypto.KeyObject): string {
+  const sig = crypto.sign(null, Buffer.from(payload), privateKey);
+  return base64UrlEncode(sig);
+}
+
+interface DeviceIdentityState {
+  deviceId: string;
+  publicKey: string;
+  privateKey: string;
+  deviceToken?: string;
+}
+
+function buildDeviceAuthPayload(params: {
+  deviceId: string;
+  clientId: string;
+  clientMode: string;
+  role: string;
+  scopes: string[];
+  signedAtMs: number;
+  token: string;
+  nonce: string | null;
+}): string {
+  const version = params.nonce ? 'v2' : 'v1';
+  const parts = [
+    version,
+    params.deviceId,
+    params.clientId,
+    params.clientMode,
+    params.role,
+    params.scopes.join(','),
+    String(params.signedAtMs),
+    params.token,
+  ];
+  if (params.nonce) parts.push(params.nonce);
+  return parts.join('|');
+}
+
+class DeviceIdentityManager {
+  private statePath: string;
+  private state: DeviceIdentityState | null = null;
+  private privateKeyObj: crypto.KeyObject | null = null;
+
+  constructor(baseDir: string) {
+    this.statePath = path.join(baseDir, '.openclaw-device-identity.json');
+  }
+
+  load(): { deviceId: string; publicKey: string; privateKeyObj: crypto.KeyObject; deviceToken?: string } {
+    if (this.state && this.privateKeyObj) {
+      return {
+        deviceId: this.state.deviceId,
+        publicKey: this.state.publicKey,
+        privateKeyObj: this.privateKeyObj,
+        deviceToken: this.state.deviceToken,
+      };
+    }
+
+    try {
+      if (fs.existsSync(this.statePath)) {
+        const raw = JSON.parse(fs.readFileSync(this.statePath, 'utf-8'));
+        if (raw && typeof raw.deviceId === 'string' && typeof raw.privateKey === 'string') {
+          const privKey = buildRawPrivateKey(Buffer.from(raw.privateKey, 'hex'));
+          this.state = raw;
+          this.privateKeyObj = privKey;
+          return {
+            deviceId: raw.deviceId,
+            publicKey: raw.publicKey,
+            privateKeyObj: privKey,
+            deviceToken: raw.deviceToken,
+          };
+        }
+      }
+    } catch {
+      // fall through to generate new identity
+    }
+
+    const { privateKey, publicKey } = crypto.generateKeyPairSync('ed25519');
+    const pubDer = publicKey.export({ type: 'spki', format: 'der' }) as Buffer;
+    const privDer = privateKey.export({ type: 'pkcs8', format: 'der' }) as Buffer;
+    const rawPub = extractRawPublicKey(pubDer);
+    const deviceId = crypto.createHash('sha256').update(rawPub).digest('hex');
+    const pubBase64Url = base64UrlEncode(rawPub);
+    const privHex = extractRawPrivateKey(privDer).toString('hex');
+
+    this.state = {
+      deviceId,
+      publicKey: pubBase64Url,
+      privateKey: privHex,
+    };
+    this.privateKeyObj = privateKey;
+
+    try {
+      fs.writeFileSync(this.statePath, JSON.stringify(this.state, null, 2));
+    } catch {
+      // non-fatal
+    }
+
+    return { deviceId, publicKey: pubBase64Url, privateKeyObj: privateKey };
+  }
+
+  saveDeviceToken(token: string): void {
+    if (this.state) {
+      this.state.deviceToken = token;
+      try {
+        fs.writeFileSync(this.statePath, JSON.stringify(this.state, null, 2));
+      } catch {
+        // non-fatal
+      }
+    }
+  }
+}
+
+// ── Gateway error with structured code ──
+
+export class GatewayError extends Error {
+  code: string;
+  detail: any;
+  constructor(code: string, message: string, detail?: any) {
+    super(message);
+    this.name = 'GatewayError';
+    this.code = code;
+    this.detail = detail;
+  }
+}
+
+// ── Message parsing helpers ──
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
@@ -189,9 +342,6 @@ function extractErrorDetail(value: unknown, seen = new Set<object>()): string {
   if (typeof value === 'string') {
     return value.trim();
   }
-  if (value instanceof Error) {
-    return value.message.trim();
-  }
   if (Array.isArray(value)) {
     for (const item of value) {
       const detail = extractErrorDetail(item, seen);
@@ -245,32 +395,12 @@ export class OpenClawClient extends EventEmitter {
   private pending = new Map<string, Pending>();
   private connectPromise: Promise<void> | null = null;
   private sessionEventSubscriptionRefs = 0;
-  private deviceId: string;
-
-  private loadDeviceId(): string {
-  const file = path.join(process.cwd(), '.openclaw-device-id');
-
-  try {
-
-    if (fs.existsSync(file)) {
-      return fs.readFileSync(file, 'utf8').trim();
-    }
-
-    const id = crypto.randomUUID();
-
-    fs.writeFileSync(file, id);
-
-    return id;
-
-  } catch {
-    return crypto.randomUUID();
-  }
-}
+  private identityManager: DeviceIdentityManager;
 
   constructor(config: OpenClawConfig) {
     super();
     this.config = config;
-    this.deviceId = this.loadDeviceId();
+    this.identityManager = new DeviceIdentityManager(process.cwd());
   }
 
   private hasOpenSocket(): boolean {
@@ -339,20 +469,23 @@ export class OpenClawClient extends EventEmitter {
           // challenge from gateway
           if (msg.type === 'event' && msg.event === 'connect.challenge') {
             try {
+              const identity = this.identityManager.load();
               const nonce = crypto.randomBytes(16).toString('hex');
               const signedAt = Date.now();
 
-              const publicKey = crypto
-                .createHash('sha256')
-                .update(this.deviceId)
-                .digest('hex');
+              const payload = buildDeviceAuthPayload({
+                deviceId: identity.deviceId,
+                clientId: 'openclaw-control-ui',
+                clientMode: 'webchat',
+                role: 'operator',
+                scopes: ['operator.read', 'operator.write'],
+                signedAtMs: signedAt,
+                token: this.config.token || 'openclaw',
+                nonce,
+              });
+              const signature = ed25519Sign(payload, identity.privateKeyObj);
 
-              const signature = crypto
-                .createHmac('sha256', this.config.token || 'openclaw')
-                .update(`${this.deviceId}:${nonce}:${signedAt}`)
-                .digest('hex');
-
-              await this.request('connect', {
+              const connectParams: any = {
                 minProtocol: 4,
                 maxProtocol: 4,
 
@@ -364,8 +497,8 @@ export class OpenClawClient extends EventEmitter {
                 },
 
                 device: {
-                  id: this.deviceId,
-                  publicKey,
+                  id: identity.deviceId,
+                  publicKey: identity.publicKey,
                   signature,
                   signedAt,
                   nonce,
@@ -381,21 +514,27 @@ export class OpenClawClient extends EventEmitter {
                   'operator.read',
                   'operator.write',
                 ],
-              });
+              };
 
+              if (identity.deviceToken) {
+                connectParams.deviceToken = identity.deviceToken;
+              }
 
-    this.connected = true;
-    this.connectPromise = null;
-    this.emit('connected');
+              const result = await this.request('connect', connectParams);
 
-    resolveOnce();
+              if (result?.deviceToken) {
+                this.identityManager.saveDeviceToken(result.deviceToken);
+              }
 
-  } catch (err: any) {
-    fail(new Error(err?.message || 'Gateway connect failed'));
-  }
-
-  return;
-}
+              this.connected = true;
+              this.connectPromise = null;
+              this.emit('connected');
+              resolveOnce();
+            } catch (err: any) {
+              fail(new Error(err?.message || 'Gateway connect failed'));
+            }
+            return;
+          }
 
           // response frame
           if (msg.type === 'res' && msg.id) {
@@ -404,8 +543,14 @@ export class OpenClawClient extends EventEmitter {
             this.pending.delete(msg.id);
             clearTimeout(pending.timer);
 
-            if (msg.ok) pending.resolve(msg.payload);
-            else pending.reject(new Error(msg?.error?.message || 'Request failed'));
+            if (msg.ok) {
+              pending.resolve(msg.payload);
+            } else {
+              const errorCode = msg?.error?.code || '';
+              const errorMsg = msg?.error?.message || 'Request failed';
+              const err = new GatewayError(errorCode, errorMsg, msg?.error?.detail);
+              pending.reject(err);
+            }
             return;
           }
 
@@ -426,7 +571,6 @@ export class OpenClawClient extends EventEmitter {
             } else if (state === 'aborted') {
               this.emit('chat.aborted', { sessionKey, runId, text, message: payload.message });
             } else if (state === 'error') {
-              // The gateway may send an error state if the LLM request fails dynamically
               this.emit('chat.error', { sessionKey, runId, error: extractChatEventError(payload, msg.error) });
             }
             return;
