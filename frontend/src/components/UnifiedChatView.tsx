@@ -586,6 +586,62 @@ function createClientStructuredChatError(detail: string): Partial<ChatMessage> {
   };
 }
 
+
+const ABORT_LIKE_ERROR_PATTERNS = [
+  /^AbortError$/i,
+  /\brequest\s+was\s+aborted\.?\b/i,
+  /\bthe\s+user\s+aborted\s+(?:a\s+)?request\.?\b/i,
+  /\boperation\s+was\s+aborted\.?\b/i,
+  /\baborted\s+by\s+user\b/i,
+  /\buser\s+aborted\b/i,
+  /\bfetch\s+aborted\b/i,
+];
+
+function collectAbortLikeErrorDetails(value: unknown, depth = 0, seen = new Set<object>()): string[] {
+  if (value === null || value === undefined || depth > 3) return [];
+  if (typeof value === 'string') return [value];
+  if (typeof value === 'number' || typeof value === 'boolean') return [String(value)];
+  if (value instanceof Error) {
+    const details = [value.name, value.message];
+    const errorRecord = value as Error & Record<string, unknown>;
+    ['code', 'cause', 'detail', 'error', 'rawDetail', 'reason', 'text', 'description'].forEach((key) => {
+      details.push(...collectAbortLikeErrorDetails(errorRecord[key], depth + 1, seen));
+    });
+    return details.filter((detail): detail is string => typeof detail === 'string' && detail.trim().length > 0);
+  }
+  if (typeof value !== 'object') return [];
+  if (seen.has(value)) return [];
+  seen.add(value);
+
+  const record = value as Record<string, unknown>;
+  const preferredKeys = ['name', 'message', 'error', 'detail', 'rawDetail', 'reason', 'text', 'description', 'code', 'cause'];
+  const details: string[] = [];
+  preferredKeys.forEach((key) => {
+    details.push(...collectAbortLikeErrorDetails(record[key], depth + 1, seen));
+  });
+  return details;
+}
+
+function isAbortLikeErrorDetail(value: unknown): boolean {
+  return collectAbortLikeErrorDetails(value).some((detail) => {
+    const normalized = detail.trim();
+    return normalized.length > 0 && ABORT_LIKE_ERROR_PATTERNS.some((pattern) => pattern.test(normalized));
+  });
+}
+
+function isAbortLikeStreamErrorEvent(evt: any): boolean {
+  return isAbortLikeErrorDetail({
+    name: evt?.name,
+    message: evt?.message,
+    error: evt?.error,
+    detail: evt?.detail,
+    rawDetail: evt?.rawDetail,
+    reason: evt?.reason,
+    text: evt?.text,
+    code: evt?.code,
+  });
+}
+
 function resolveSubmitError(
   data: { errorCode?: string; errorParams?: Record<string, string | number | boolean | null> | null; errorDetail?: string | null; error?: string; message?: string },
   t: TFunction,
@@ -2283,6 +2339,14 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
                 queueAttachedPatch({ content: typeof evt.text === 'string' ? evt.text : '' }, evt.type === 'final');
               } else if (evt.type === 'error') {
                 receivedError = true;
+                if (isAbortLikeStreamErrorEvent(evt)) {
+                  if (attachedMessageId) {
+                    dropQueuedMessagePatch(attachedMessageId);
+                    queueAttachedPatch({ processStreaming: false }, true);
+                  }
+                  await recoverLatestChatMessages(true);
+                  continue;
+                }
                 if (!attachedMessageId) continue;
                 dropQueuedMessagePatch(attachedMessageId);
                 const errorUpdate = mapStreamingErrorUpdate(evt, `❌ ${t('common.error')}: ${t('common.unknownError')}`);
@@ -2297,7 +2361,15 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
           await recoverLatestChatMessages(true);
         }
       } catch (error: any) {
-        if (error?.name !== 'AbortError' && attachedMessageId) {
+        if (error?.name === 'AbortError' || isAbortLikeErrorDetail(error)) {
+          if (attachedMessageId) {
+            dropQueuedMessagePatch(attachedMessageId);
+            queueAttachedPatch({ processStreaming: false }, true);
+          }
+          if (!controller.signal.aborted) {
+            await recoverLatestChatMessages(true);
+          }
+        } else if (attachedMessageId) {
           dropQueuedMessagePatch(attachedMessageId);
           const detail = typeof error?.message === 'string' && error.message.trim()
             ? error.message
@@ -2975,6 +3047,11 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
               } else if (evt.type === 'error') {
                 receivedError = true;
                 dropAssistantPatches();
+                if (isAbortLikeStreamErrorEvent(evt)) {
+                  queueAssistantPatch({ processStreaming: false }, true);
+                  await recoverLatestChatMessages(true);
+                  continue;
+                }
                 const errorUpdate = mapStreamingErrorUpdate(evt, `❌ ${t('common.error')}: ${evt.error || t('common.unknownError')}`);
                 updateAssistantMessages(message => ({
                   ...message,
@@ -2992,7 +3069,11 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
           await recoverLatestChatMessages(true);
         }
       } catch (error: any) {
-        if (error?.name !== 'AbortError') {
+        if (error?.name === 'AbortError' || isAbortLikeErrorDetail(error)) {
+          dropAssistantPatches();
+          queueAssistantPatch({ processStreaming: false }, true);
+          await recoverLatestChatMessages(true);
+        } else {
           dropAssistantPatches();
           const detail = typeof error?.message === 'string' && error.message.trim()
             ? error.message
@@ -3229,6 +3310,11 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
               } else if (evt.type === 'error') {
                 receivedError = true;
                 dropAssistantPatches();
+                if (isAbortLikeStreamErrorEvent(evt)) {
+                  queueAssistantPatch({ processStreaming: false }, true);
+                  await recoverLatestChatMessages(true);
+                  continue;
+                }
                 const errorUpdate = mapStreamingErrorUpdate(evt, `❌ ${t('common.error')}: ${evt.error || t('common.unknownError')}`);
                 updateAssistantMessages(message => ({
                   ...message,
@@ -3246,7 +3332,11 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
           await recoverLatestChatMessages(true);
         }
       } catch (error: any) {
-        if (error.name !== 'AbortError') {
+        if (error?.name === 'AbortError' || isAbortLikeErrorDetail(error)) {
+          dropAssistantPatches();
+          queueAssistantPatch({ processStreaming: false }, true);
+          await recoverLatestChatMessages(true);
+        } else {
           dropAssistantPatches();
           const detail = typeof error?.message === 'string' && error.message.trim()
             ? error.message
