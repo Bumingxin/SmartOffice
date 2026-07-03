@@ -10563,6 +10563,8 @@ type ResolvedChatCommandResult = {
   clearBeforeSave?: boolean;
 };
 
+const CHAT_NEW_SESSION_READY_MESSAGE = '新会话已就绪 🐾';
+
 function parseChatCommand(rawMessage: unknown): ParsedChatCommand | null {
   const normalized = normalizeCliText(rawMessage);
   if (!normalized.startsWith('/')) return null;
@@ -10588,6 +10590,7 @@ const builtinChatCommandOptions: Record<string, { clearBeforeSave?: boolean }> =
   '/status': {},
   '/help': {},
   '/models': {},
+  '/new': {},
   '/clear': { clearBeforeSave: true },
 };
 
@@ -10608,9 +10611,24 @@ async function resolveChatCommandResult(
   try {
     const client = await getConnection(sessionId);
     const sessionInfo = sessionManager.getSession(sessionId);
+    const agentId = sessionInfo?.agentId || 'main';
+
+    if (parsed.command === '/new') {
+      const started = await client.sendChatMessageStreaming({
+        sessionKey: sessionId,
+        agentId,
+        message: commandLine,
+      });
+      await client.waitForRun(started.runId);
+      return {
+        content: CHAT_NEW_SESSION_READY_MESSAGE,
+        clearBeforeSave: builtinOptions?.clearBeforeSave,
+      };
+    }
+
     const nativeText = normalizeCliText(await client.sendChatMessage({
       sessionKey: sessionId,
-      agentId: sessionInfo?.agentId || 'main',
+      agentId,
       message: commandLine,
     }));
     if (!nativeText || nativeText === 'No assistant text found in response.') {
