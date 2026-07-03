@@ -293,7 +293,28 @@ sudo ufw status
 
 ## 🔁 修改代码后如何生效
 
-### 推荐流程
+### 推荐：使用 restart.sh 一键重建并重启
+
+如果已经把最新文件更新到服务器，只想重新构建并让最新程序生效，可以执行：
+
+```bash
+cd ~/SmartOffice
+chmod +x restart.sh
+./restart.sh 3456
+```
+
+如果使用其他端口，例如 `8080`：
+
+```bash
+cd ~/SmartOffice
+./restart.sh 8080
+```
+
+`restart.sh` 会自动安装缺失依赖、执行 `npm run build`、优先重启对应的 `clawui-端口.service`，如果 systemd 服务不存在则回退为 `nohup` 启动，并检查端口和 `/health`。
+
+### 完整重新部署
+
+如果需要重新安装依赖、刷新 systemd 服务文件、同步 OpenClaw 配置，可以执行完整部署脚本：
 
 ```bash
 cd ~/SmartOffice
@@ -306,26 +327,23 @@ cd ~/SmartOffice
 Ctrl + F5
 ```
 
-### 如果只改了前端代码
-
-仍建议执行完整部署：
-
-```bash
-cd ~/SmartOffice
-./deploy-release.sh 3456
-```
-
-原因：前端需要重新构建，后端负责提供构建后的静态资源。
-
 ### 如果只改了后端代码
 
+仍推荐使用 `restart.sh`：
+
 ```bash
 cd ~/SmartOffice
-npm run build:backend
-systemctl --user restart clawui-3456.service
+./restart.sh 3456
 ```
 
----
+### 如果只改了前端代码
+
+仍推荐使用 `restart.sh`，因为前端需要重新构建，后端负责提供构建后的静态资源：
+
+```bash
+cd ~/SmartOffice
+./restart.sh 3456
+```
 
 ## 🧯 常见故障排查
 
@@ -474,3 +492,4 @@ rm -rf ~/SmartOffice
 ```text
 /tmp/clawui_back.log
 ```
+
