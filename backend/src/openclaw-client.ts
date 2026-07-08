@@ -1,4 +1,4 @@
-﻿import WebSocket from 'ws';
+import WebSocket from 'ws';
 import { EventEmitter } from 'events';
 import crypto from 'crypto';
 import fs from 'fs';
@@ -7,6 +7,11 @@ import path from 'path';
 const CHAT_SEND_START_TIMEOUT_MS = 5 * 60 * 1000;
 const CHAT_HISTORY_TIMEOUT_MS = 90 * 1000;
 const GATEWAY_CONNECT_TIMEOUT_MS = 15000;
+
+const RECONNECT_BASE_DELAY_MS = 1000;
+const RECONNECT_MAX_DELAY_MS = 30000;
+const RECONNECT_MAX_ATTEMPTS = 10;
+const RECONNECT_JITTER_MS = 500;
 
 interface OpenClawConfig {
   gatewayUrl: string;
@@ -397,6 +402,11 @@ export class OpenClawClient extends EventEmitter {
   private sessionEventSubscriptionRefs = 0;
   private identityManager: DeviceIdentityManager;
 
+  private reconnectAttempts = 0;
+  private reconnectTimer: NodeJS.Timeout | null = null;
+  private reconnectEnabled = true;
+  private intentionalDisconnect = false;
+
   constructor(config: OpenClawConfig) {
     super();
     this.config = config;
@@ -411,6 +421,75 @@ export class OpenClawClient extends EventEmitter {
     return this.hasOpenSocket();
   }
 
+  // ── Auto-reconnect logic ──
+
+  private scheduleReconnect(): void {
+    if (!this.reconnectEnabled || this.intentionalDisconnect) return;
+    if (this.reconnectAttempts >= RECONNECT_MAX_ATTEMPTS) {
+      console.error(`[OpenClawClient] Max reconnect attempts (${RECONNECT_MAX_ATTEMPTS}) reached, will retry after 60s cooldown`);
+      this.emit('reconnect:failed');
+      this.reconnectTimer = setTimeout(() => {
+        this.reconnectTimer = null;
+        this.reconnectAttempts = 0;
+        console.log(`[OpenClawClient] Cooldown expired, resetting reconnect attempts`);
+        this.scheduleReconnect();
+      }, 60_000);
+      return;
+    }
+
+    const baseDelay = Math.min(
+      RECONNECT_BASE_DELAY_MS * Math.pow(2, this.reconnectAttempts),
+      RECONNECT_MAX_DELAY_MS
+    );
+    const jitter = Math.floor(Math.random() * RECONNECT_JITTER_MS);
+    const delay = baseDelay + jitter;
+
+    this.reconnectTimer = setTimeout(async () => {
+      this.reconnectTimer = null;
+      this.reconnectAttempts += 1;
+
+      console.log(`[OpenClawClient] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${RECONNECT_MAX_ATTEMPTS})`);
+
+      try {
+        await this.connect();
+        console.log(`[OpenClawClient] Reconnected successfully`);
+        this.reconnectAttempts = 0;
+        this.emit('reconnected');
+        await this.resubscribeSessionEvents();
+      } catch (err: any) {
+        console.error(`[OpenClawClient] Reconnect attempt ${this.reconnectAttempts} failed: ${err?.message || err}`);
+        this.scheduleReconnect();
+      }
+    }, delay);
+  }
+
+  private async resubscribeSessionEvents(): Promise<void> {
+    if (this.sessionEventSubscriptionRefs > 0 && this.hasOpenSocket()) {
+      try {
+        await this.request('sessions.subscribe', {}, 15000);
+        console.log(`[OpenClawClient] Re-subscribed session events`);
+      } catch (err: any) {
+        console.error(`[OpenClawClient] Failed to re-subscribe session events: ${err?.message || err}`);
+      }
+    }
+  }
+
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+  }
+
+  disableAutoReconnect(): void {
+    this.reconnectEnabled = false;
+    this.clearReconnectTimer();
+  }
+
+  enableAutoReconnect(): void {
+    this.reconnectEnabled = true;
+  }
+
   async connect(): Promise<void> {
     if (this.hasOpenSocket()) return;
     if (this.connectPromise) return this.connectPromise;
@@ -420,7 +499,6 @@ export class OpenClawClient extends EventEmitter {
       } catch {}
       this.ws = null;
       this.connected = false;
-      this.sessionEventSubscriptionRefs = 0;
     }
 
     this.connectPromise = new Promise((resolve, reject) => {
@@ -616,9 +694,13 @@ export class OpenClawClient extends EventEmitter {
       this.ws.on('close', () => {
         this.connected = false;
         this.connectPromise = null;
-        this.sessionEventSubscriptionRefs = 0;
         this.rejectPendingRequests(new Error('Client disconnected'));
         this.emit('disconnected');
+        if (!this.intentionalDisconnect) {
+          this.scheduleReconnect();
+        } else {
+          this.sessionEventSubscriptionRefs = 0;
+        }
       });
 
       this.ws.on('error', (err) => {
@@ -660,7 +742,6 @@ export class OpenClawClient extends EventEmitter {
         clearTimeout(timer);
         this.pending.delete(id);
         this.connected = false;
-        this.sessionEventSubscriptionRefs = 0;
         reject(error);
       });
     });
@@ -860,6 +941,8 @@ export class OpenClawClient extends EventEmitter {
   }
 
   disconnect(): void {
+    this.intentionalDisconnect = true;
+    this.clearReconnectTimer();
     this.rejectPendingRequests(new Error('Client disconnected'));
 
     if (this.ws) {
@@ -869,6 +952,23 @@ export class OpenClawClient extends EventEmitter {
     this.connected = false;
     this.connectPromise = null;
     this.sessionEventSubscriptionRefs = 0;
+  }
+
+  async reconnect(): Promise<void> {
+    this.clearReconnectTimer();
+    this.rejectPendingRequests(new Error('Reconnecting'));
+    if (this.ws) {
+      this.intentionalDisconnect = true;
+      try { this.ws.close(); } catch {}
+      this.ws = null;
+    }
+    this.connected = false;
+    this.connectPromise = null;
+    this.sessionEventSubscriptionRefs = 0;
+
+    this.intentionalDisconnect = false;
+    this.reconnectAttempts = 0;
+    return this.connect();
   }
 }
 
