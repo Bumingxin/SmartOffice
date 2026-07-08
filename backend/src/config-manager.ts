@@ -126,8 +126,7 @@ const DEFAULT_CONFIG: Config = {
 export class ConfigManager {
   private db: DB;
 
-  constructor() {
-    this.db = new DB();
+  constructor(db?: DB) { this.db = db || new DB();
   }
 
   getConfig(): Config {
