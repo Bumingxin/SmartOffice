@@ -53,11 +53,51 @@ restart_with_systemd() {
   systemctl --user restart "$SERVICE_NAME"
 }
 
+stop_existing_backend() {
+  local port="$1"
+  local killed=0
+
+  # Kill by absolute path match
+  if pkill -f "$BACKEND_DIR/dist/index.js" 2>/dev/null; then
+    info "Killed process by path match"
+    killed=1
+  fi
+
+  # Kill by relative path match (handles processes started from project dir)
+  if pkill -f "node dist/index.js" 2>/dev/null; then
+    info "Killed process by relative path match"
+    killed=1
+  fi
+
+  # Kill by port using fuser
+  if command -v fuser >/dev/null 2>&1; then
+    local pids
+    pids=$(fuser "${port}/tcp" 2>/dev/null | xargs) || true
+    if [ -n "$pids" ]; then
+      info "Killing processes on port $port: $pids"
+      kill $pids 2>/dev/null || true
+      killed=1
+    fi
+  fi
+
+  # Wait for port to be free
+  if [ "$killed" -eq 1 ]; then
+    info "Waiting for port $port to be free..."
+    local i
+    for ((i=1; i<=10; i++)); do
+      if ! ss -tlnp 2>/dev/null | grep -q ":${port} "; then
+        info "Port $port is free"
+        return 0
+      fi
+      sleep 1
+    done
+    warn "Port $port still in use after 10s, proceeding anyway"
+  fi
+}
+
 restart_with_nohup() {
   warn "Systemd service $SERVICE_NAME was not found; falling back to nohup startup."
-  info "Stopping existing backend/dist/index.js processes..."
-  pkill -f "$BACKEND_DIR/dist/index.js" 2>/dev/null || true
-  sleep 2
+  stop_existing_backend "$PORT"
 
   info "Starting backend with nohup on port $PORT..."
   cd "$BACKEND_DIR"
