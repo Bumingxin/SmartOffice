@@ -14,7 +14,7 @@ try {
   
   if (legacySession || mainAsSessionId) {
     const oldId = legacySession ? legacyId : 'main';
-    const newId = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+    const newId = require('crypto').randomUUID();
     
     db.prepare("UPDATE sessions SET id = ?, name = '综合管家', agentId = 'main' WHERE id = ?").run(newId, oldId);
     
@@ -37,7 +37,7 @@ try {
     } else {
         console.log("No main agent found. Creating default...");
         const now = Date.now();
-        const randId = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+        const randId = require('crypto').randomUUID();
         db.prepare(`
           INSERT INTO sessions (id, name, agentId, position, created_at, updated_at)
           VALUES (?, ?, ?, ?, ?, ?)
