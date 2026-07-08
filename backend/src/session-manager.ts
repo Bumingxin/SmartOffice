@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { EventEmitter } from 'events';
 import type { AgentRuntimeMode, AgentSystemPromptMode, AgentToolMode, DB, SessionRow } from './db';
 
@@ -126,7 +127,7 @@ export class SessionManager extends EventEmitter {
   }
 
   private generateId(): string {
-    return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+    return crypto.randomUUID();
   }
 }
 
