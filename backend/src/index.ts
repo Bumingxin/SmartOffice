@@ -180,6 +180,25 @@ fs.mkdirSync(uploadDir, { recursive: true });
 // OpenClaw media directory (screenshots, inbound files, etc.)
 const openclawMediaDir = path.join(process.env.HOME || '.', '.openclaw', 'media');
 
+// Path safety: restrict file downloads to allowed directories
+const openclawHome = path.join(process.env.HOME || '.', '.openclaw');
+function isPathWithinAllowedDirectories(absolutePath: string): boolean {
+  const resolved = path.resolve(absolutePath);
+  const allowedRoots: string[] = [
+    path.resolve(uploadDir),
+    path.resolve(openclawHome),
+    path.resolve(openclawMediaDir),
+  ];
+  try {
+    const entries = fs.readdirSync(openclawHome, { withFileTypes: true })
+      .filter(e => e.isDirectory() && (e.name.startsWith('workspace-') || e.name === 'agents' || e.name === 'media'));
+    for (const entry of entries) {
+      allowedRoots.push(path.resolve(openclawHome, entry.name));
+    }
+  } catch {}
+  return allowedRoots.some(root => resolved === root || resolved.startsWith(root + path.sep));
+}
+
 const storage = multer.diskStorage({
   destination: (req, _file, cb) => {
     try {
@@ -206,7 +225,7 @@ const upload = multer({
 
 // Initialize managers
 const db = new DB();
-const configManager = new ConfigManager();
+const configManager = new ConfigManager(db);
 const sessionManager = new SessionManager(db);
 const agentProvisioner = new AgentProvisioner();
 type StructuredMessageParams = Record<string, string | number | boolean | null>;
@@ -6441,6 +6460,7 @@ if (mainRegistered) {
 }
 
 const connections = new Map<string, OpenClawClient>();
+const connectionLocks = new Map<string, Promise<OpenClawClient>>();
 
 function getActiveGatewayConnectionStatus(): GatewayConnectionProbeResult | null {
   const activeConnectionCount = Array.from(connections.values())
@@ -7771,30 +7791,48 @@ async function getConnection(sessionId: string): Promise<OpenClawClient> {
     cachedClient.disconnect();
   }
 
-  const config = configManager.getConfig();
-  const client = new OpenClawClient({
-    gatewayUrl: config.gatewayUrl,
-    token: config.token,
-    password: config.password,
-  });
-  client.on('error', (err) => {
-    console.error(`[OpenClawClient Error for session ${sessionId}]`, err.message);
-  });
-
-  try {
-    await client.connect();
-  } catch (error) {
-    connections.delete(sessionId);
-    client.disconnect();
-    throw error;
+  const existingLock = connectionLocks.get(sessionId);
+  if (existingLock) {
+    return existingLock;
   }
-  connections.set(sessionId, client);
 
-  client.on('disconnected', () => {
-    connections.delete(sessionId);
-  });
+  const connectPromise = (async () => {
+    const config = configManager.getConfig();
+    const client = new OpenClawClient({
+      gatewayUrl: config.gatewayUrl,
+      token: config.token,
+      password: config.password,
+    });
+    client.on('error', (err) => {
+      console.error(`[OpenClawClient Error for session ${sessionId}]`, err.message);
+    });
 
-  return client;
+    try {
+      await client.connect();
+
+      if (connections.has(sessionId) && connections.get(sessionId) !== client) {
+        client.disconnect();
+        return connections.get(sessionId)!;
+      }
+
+      connections.set(sessionId, client);
+
+      client.on('disconnected', () => {
+        connections.delete(sessionId);
+      });
+
+      return client;
+    } catch (error) {
+      connections.delete(sessionId);
+      client.disconnect();
+      throw error;
+    } finally {
+      connectionLocks.delete(sessionId);
+    }
+  })();
+
+  connectionLocks.set(sessionId, connectPromise);
+  return connectPromise;
 }
 
 // Health check
@@ -11534,8 +11572,12 @@ app.get('/uploads/:filename', (req, res) => {
 });
 
 
-// Serve OpenClaw files (workspaces, media, etc.)
-app.use('/openclaw', express.static(path.join(process.env.HOME || '', '.openclaw')));
+// Serve OpenClaw files - restricted to safe subdirectories only
+const OPENCLAW_SAFE_STATIC_DIRS = ['media', 'host-tools'];
+for (const safeDir of OPENCLAW_SAFE_STATIC_DIRS) {
+  const safePath = path.join(process.env.HOME || '', '.openclaw', safeDir);
+  app.use(`/openclaw/${safeDir}`, express.static(safePath));
+}
 
 // Securely serve arbitrary local files via base64 encoded paths
 app.get('/api/files/download', (req, res) => {
@@ -11552,6 +11594,11 @@ app.get('/api/files/download', (req, res) => {
     if (!path.isAbsolute(absolutePath)) {
       return res.status(403).send('Only absolute paths are allowed');
     }
+    // Security: restrict to allowed directories only
+    if (!isPathWithinAllowedDirectories(absolutePath)) {
+      return res.status(403).send('Access denied: path outside allowed directories');
+    }
+
 
     if (!fs.existsSync(absolutePath)) {
       return res.status(404).send('File not found');
