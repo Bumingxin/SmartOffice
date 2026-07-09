@@ -320,7 +320,6 @@ const BROWSER_POST_RESTART_WARMUP_DELAY_MS = 8000;
 const BROWSER_POST_RESTART_WARMUP_MARKER_MAX_AGE_MS = 30 * 60 * 1000;
 const BROWSER_HEADED_MODE_RESTART_TIMEOUT_MS = 3 * 60 * 1000;
 const BROWSER_HEADED_MODE_RESTART_POLL_INTERVAL_MS = 1500;
-const UPDATE_SCRIPT_URL = 'https://raw.githubusercontent.com/liandu2024/OpenClaw-Chat-Gateway/main/update.sh';
 const UPDATE_PHASE_MARKER_PREFIX = '::clawui-update-phase::';
 const UPDATE_LOG_LIMIT = 200;
 const UPDATE_CANCEL_KILL_TIMEOUT_MS = 5000;
@@ -6011,8 +6010,8 @@ async function resumePersistedUpdateRestartFlow() {
 }
 
 function buildUpdateCommand(targetPort: string) {
-  return `set -o pipefail; curl -fsSL ${JSON.stringify(UPDATE_SCRIPT_URL)} | bash -s -- ${JSON.stringify(targetPort)}`;
-}
+  const scriptPath = path.join(appRepoRoot, 'update.sh');
+  return `bash ${JSON.stringify(scriptPath)} ${JSON.stringify(targetPort)}`;
 
 async function startUpdateTask() {
   if (activeUpdateProcess || ['checking', 'updating', 'stopping', 'restarting'].includes(updateSnapshot.status)) {
