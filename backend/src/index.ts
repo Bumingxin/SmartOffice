@@ -6012,6 +6012,7 @@ async function resumePersistedUpdateRestartFlow() {
 function buildUpdateCommand(targetPort: string) {
   const scriptPath = path.join(appRepoRoot, 'update.sh');
   return `bash ${JSON.stringify(scriptPath)} ${JSON.stringify(targetPort)}`;
+}
 
 async function startUpdateTask() {
   if (activeUpdateProcess || ['checking', 'updating', 'stopping', 'restarting'].includes(updateSnapshot.status)) {
