@@ -118,6 +118,7 @@ ensure_node_project_deps "$FRONTEND_DIR" "frontend"
 
 info "Building latest code..."
 cd "$PROJECT_ROOT"
+npm rebuild
 npm run build
 
 if [ -f "$SERVICE_DIR/$SERVICE_NAME" ]; then

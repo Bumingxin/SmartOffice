@@ -40,6 +40,8 @@ cd backend && npm install --include=dev && cd ..
 cd frontend && npm install --include=dev && cd ..
 
 emit_phase "build"
+echo "Rebuilding native modules..."
+npm rebuild
 echo "Building projects..."
 npm run build
 restore_deploy_lockfiles

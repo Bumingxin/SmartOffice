@@ -32,6 +32,12 @@ if ! command -v node &> /dev/null; then
     exit 1
 fi
 
+NODE_MAJOR=$(node -v | sed 's/v//' | cut -d. -f1)
+if [ "$NODE_MAJOR" -lt 18 ]; then
+    echo -e "Node.js version too low. Please upgrade to v18 or later."
+    exit 1
+fi
+
 if ! command -v npm &> /dev/null; then
     echo -e "${RED}错误: 未安装 npm。请先安装 npm。${NC}"
     exit 1
