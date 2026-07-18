@@ -284,6 +284,7 @@
     "resultsCount": "{{count}} results",
     "latestRoundOnly": "Only the latest round can be edited or regenerated.",
     "inputPlaceholder": "Press Enter to send, Shift + Enter for newline",
+    "autoRetryFailed": "Connection interrupted. Auto-retry failed. Please retry manually.",
     "requestFailed": "Request failed",
     "previewRender": "Preview rendered output",
     "switchToEdit": "Switch to edit",

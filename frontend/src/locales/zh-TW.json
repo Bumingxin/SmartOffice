@@ -284,6 +284,7 @@
     "resultsCount": "{{count}} 個結果",
     "latestRoundOnly": "只能編輯或重新生成最後一輪對話。",
     "inputPlaceholder": "Enter 送出訊息，Shift + Enter 換行",
+    "autoRetryFailed": "連線中旍，自動重試失敗，請手動重試",
     "requestFailed": "請求失敗",
     "previewRender": "預覽渲染效果",
     "switchToEdit": "切換到編輯",

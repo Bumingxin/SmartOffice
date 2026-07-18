@@ -284,6 +284,7 @@
     "resultsCount": "{{count}} 个结果",
     "latestRoundOnly": "只能编辑或重新生成最后一轮对话。",
     "inputPlaceholder": "Enter 发送消息，Shift + Enter 换行",
+    "autoRetryFailed": "连接中断，自动重试失败，请手动重试",
     "requestFailed": "请求失败",
     "previewRender": "预览渲染效果",
     "switchToEdit": "切换到编辑",
