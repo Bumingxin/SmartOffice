@@ -37,6 +37,7 @@ const GROUP_ACTIVE_RUN_RECOVERY_POLL_MS = 500;
 const GROUP_SSE_RECOVERY_THROTTLE_MS = 2000;
 const GROUP_POST_RUN_SETTLE_POLL_MS = 2000;
 const GROUP_POST_RUN_SETTLE_TIMEOUT_MS = 120000;
+const MAX_CHAT_AUTO_RETRY = 1;
 const DEFAULT_PROCESS_START_TAG = '[执行工作_Start]';
 const DEFAULT_PROCESS_END_TAG = '[执行工作_End]';
 const MODAL_FORM_FONT_STYLE = {
@@ -888,6 +889,8 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
   const commandListRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const attachedRunControllerRef = useRef<AbortController | null>(null);
+  const autoRetryCountRef = useRef(0);
+  const userStoppedRef = useRef(false);
   const justSelectedFileRef = useRef(false);
   const dragCounter = useRef(0);
   const isInitialLoad = useRef(true);
@@ -2214,6 +2217,8 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
 
   useEffect(() => {
     clearQueuedMessagePatches();
+    autoRetryCountRef.current = 0;
+    userStoppedRef.current = false;
     olderLoadInFlightRef.current = false;
     newerHistoryPagesRef.current = [];
     historyWindowScrollTargetRef.current = null;
@@ -2344,7 +2349,10 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
                     dropQueuedMessagePatch(attachedMessageId);
                     queueAttachedPatch({ processStreaming: false }, true);
                   }
-                  await recoverLatestChatMessages(true);
+                  const retried = await tryAutoRetryRegenerate();
+                  if (!retried) {
+                    await recoverLatestChatMessages(true);
+                  }
                   continue;
                 }
                 if (!attachedMessageId) continue;
@@ -2367,7 +2375,10 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
             queueAttachedPatch({ processStreaming: false }, true);
           }
           if (!controller.signal.aborted) {
-            await recoverLatestChatMessages(true);
+            const retried = await tryAutoRetryRegenerate();
+            if (!retried) {
+              await recoverLatestChatMessages(true);
+            }
           }
         } else if (attachedMessageId) {
           dropQueuedMessagePatch(attachedMessageId);
@@ -2952,8 +2963,12 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
     options?: {
       explicitParentId?: string;
       targetMessageId?: string;
+      isAutoRetry?: boolean;
     },
   ) => {
+    if (!options?.isAutoRetry) {
+      autoRetryCountRef.current = 0;
+    }
     if (isChat) {
       const tempId = `temp-${Date.now()}`;
       let resolvedId = tempId;
@@ -2993,7 +3008,7 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
             message: contentStr,
             sessionId: activeKey,
             parentId,
-            ...(isPersistedMessageId(requestTargetMessageId) ? { targetMessageId: requestTargetMessageId } : {}),
+            ...(options?.isAutoRetry ? {} : (isPersistedMessageId(requestTargetMessageId) ? { targetMessageId: requestTargetMessageId } : {})),
           }),
         });
         if (!response.ok || !response.body) {
@@ -3049,7 +3064,10 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
                 dropAssistantPatches();
                 if (isAbortLikeStreamErrorEvent(evt)) {
                   queueAssistantPatch({ processStreaming: false }, true);
-                  await recoverLatestChatMessages(true);
+                  const retried = await tryAutoRetryRegenerate();
+                  if (!retried) {
+                    await recoverLatestChatMessages(true);
+                  }
                   continue;
                 }
                 const errorUpdate = mapStreamingErrorUpdate(evt, `❌ ${t('common.error')}: ${evt.error || t('common.unknownError')}`);
@@ -3072,7 +3090,10 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
         if (error?.name === 'AbortError' || isAbortLikeErrorDetail(error)) {
           dropAssistantPatches();
           queueAssistantPatch({ processStreaming: false }, true);
-          await recoverLatestChatMessages(true);
+          const retried = await tryAutoRetryRegenerate();
+          if (!retried) {
+            await recoverLatestChatMessages(true);
+          }
         } else {
           dropAssistantPatches();
           const detail = typeof error?.message === 'string' && error.message.trim()
@@ -3195,9 +3216,37 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
     return '';
   };
 
+  const tryAutoRetryRegenerate = async (): Promise<boolean> => {
+    if (!isChat) return false;
+    if (userStoppedRef.current) return false;
+    if (autoRetryCountRef.current >= MAX_CHAT_AUTO_RETRY) return false;
+    const latestAssistantMsg = [...messagesRef.current]
+      .reverse()
+      .find(m => m.role === 'assistant' || m.role === 'system');
+    if (!latestAssistantMsg) return false;
+    autoRetryCountRef.current += 1;
+    setIsLoading(false);
+    try {
+      await handleRegenerate(latestAssistantMsg, undefined, { isAutoRetry: true });
+    } catch {
+      const errorMsg = createClientStructuredChatError(t('unifiedChat.autoRetryFailed'));
+      setMessages(prev => [...prev, {
+        id: `retry-err-${Date.now()}`,
+        role: 'system',
+        content: String(errorMsg.content || ''),
+        messageCode: errorMsg.messageCode,
+        rawDetail: errorMsg.rawDetail,
+        timestamp: new Date(),
+      }]);
+      setIsLoading(false);
+    }
+    return true;
+  };
+
   // ---- Send message ----
   const handleSubmit = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
+    autoRetryCountRef.current = 0;
     if ((!input.trim() && pendingFiles.length === 0 && !quotedMessage) || isLoading || isGroupBusy) return;
     const currentInput = input.trim(); const currentFiles = [...pendingFiles]; const currentQuote = quotedMessage;
     const submitLeafId = prepareLatestHistoryWindowForSubmit();
@@ -3312,7 +3361,10 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
                 dropAssistantPatches();
                 if (isAbortLikeStreamErrorEvent(evt)) {
                   queueAssistantPatch({ processStreaming: false }, true);
-                  await recoverLatestChatMessages(true);
+                  const retried = await tryAutoRetryRegenerate();
+                  if (!retried) {
+                    await recoverLatestChatMessages(true);
+                  }
                   continue;
                 }
                 const errorUpdate = mapStreamingErrorUpdate(evt, `❌ ${t('common.error')}: ${evt.error || t('common.unknownError')}`);
@@ -3335,7 +3387,10 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
         if (error?.name === 'AbortError' || isAbortLikeErrorDetail(error)) {
           dropAssistantPatches();
           queueAssistantPatch({ processStreaming: false }, true);
-          await recoverLatestChatMessages(true);
+          const retried = await tryAutoRetryRegenerate();
+          if (!retried) {
+            await recoverLatestChatMessages(true);
+          }
         } else {
           dropAssistantPatches();
           const detail = typeof error?.message === 'string' && error.message.trim()
@@ -3393,6 +3448,8 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
   };
 
   const handleStop = async () => {
+    userStoppedRef.current = true;
+    try {
     if (isChat && activeKey) {
       try {
         const response = await fetch('/api/chat/stop', {
@@ -3427,6 +3484,9 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
         }
       } catch {}
       return;
+    }
+    } finally {
+      userStoppedRef.current = false;
     }
   };
 
