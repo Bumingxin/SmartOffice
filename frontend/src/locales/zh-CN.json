@@ -320,6 +320,13 @@
         "zh-TW": "繁體中文",
         "en": "English"
       },
+      "appearanceLabel": "外观",
+      "appearanceHint": "选择界面主题风格，深色模式为霓虹深空风格。",
+      "appearanceOptions": {
+        "light": "浅色",
+        "dark": "深色",
+        "system": "跟随系统"
+      },
       "historyPageRoundsLabel": "历史分页轮数",
       "historyPageRoundsPlaceholder": "30",
       "historyPageRoundsHint": "按用户发起消息的次数计算对话分页轮数，用户发起 30 次消息，就算 30 轮，不受 AI 回复条数影响。",

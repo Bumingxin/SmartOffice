@@ -10,6 +10,7 @@ import {
 } from '../utils/historyPagination';
 import ModelFallbackEditor, { type ModelFallbackMode } from './ModelFallbackEditor';
 import ModelSinglePicker from './ModelSinglePicker';
+import { useTheme, type Theme } from '../contexts/ThemeContext';
 
 interface SettingsViewProps {
   isConnected: boolean;
@@ -596,6 +597,7 @@ function normalizeGatewayRestartTaskInfo(raw: unknown): GatewayRestartTaskInfo |
 
 export default function SettingsView({ isConnected, settingsTab, onMenuClick, onModelsChanged }: SettingsViewProps) {
   const { t, i18n } = useTranslation();
+  const { theme, setTheme, resolvedTheme } = useTheme();
 
   const openSettingsErrorModal = (message: string, detail = '') => {
     setGatewayErrorMessage(message);
@@ -4186,9 +4188,11 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
           ? t('settings.models.headerTitle')
           : t('settings.about.headerTitle');
 
+  const isDark = resolvedTheme === 'dark';
+
   return (
-    <div className="flex flex-col h-full bg-gray-50/50">
-      <header className="h-14 flex items-center px-4 sm:px-8 border-b border-gray-200 bg-white sticky top-0 z-10 gap-3">
+    <div className={`flex flex-col h-full ${isDark ? 'bg-gray-50' : 'bg-gray-50/50'}`}>
+      <header className={`h-14 flex items-center px-4 sm:px-8 border-b sticky top-0 z-10 gap-3 ${isDark ? 'border-gray-400 bg-gray-100' : 'border-gray-200 bg-white'}`} style={isDark ? { borderBottomColor: 'rgba(0, 240, 255, 0.25)', boxShadow: '0 1px 10px rgba(0, 240, 255, 0.15)' } : undefined}>
         <button 
           className="md:hidden text-gray-500 hover:text-gray-900 focus:outline-none pr-1"
           onClick={onMenuClick}
@@ -4731,6 +4735,31 @@ export default function SettingsView({ isConnected, settingsTab, onMenuClick, on
                       </span>
                     </div>
                     <p className="text-xs text-gray-400 mt-1.5">{t('settings.general.languageHint')}</p>
+                  </div>
+
+                  {/* Appearance / Theme */}
+                  <div className="border-t border-gray-100 pt-6">
+                    <label className="block text-sm font-semibold text-gray-900 mb-2">{t('settings.general.appearanceLabel')}</label>
+                    <div className="grid grid-cols-3 gap-3">
+                      {(['light', 'dark', 'system'] as Theme[]).map((option) => (
+                        <button
+                          key={option}
+                          type="button"
+                          onClick={() => setTheme(option)}
+                          className={`relative flex flex-col items-center gap-2 px-4 py-3 rounded-xl border-2 transition-all ${
+                            theme === option
+                              ? 'border-blue-500 bg-blue-50 font-semibold text-blue-700'
+                              : 'border-gray-200 bg-gray-50 text-gray-600 hover:border-gray-300 hover:bg-gray-100'
+                          }`}
+                        >
+                          <span className="text-lg">
+                            {option === 'light' ? '☀️' : option === 'dark' ? '🌙' : '💻'}
+                          </span>
+                          <span className="text-xs">{t(`settings.general.appearanceOptions.${option}`)}</span>
+                        </button>
+                      ))}
+                    </div>
+                    <p className="text-xs text-gray-400 mt-1.5">{t('settings.general.appearanceHint')}</p>
                   </div>
 
                   <div className="border-t border-gray-100 pt-6">

@@ -320,6 +320,13 @@
         "zh-TW": "繁體中文",
         "en": "English"
       },
+      "appearanceLabel": "外觀",
+      "appearanceHint": "選擇介面主題風格，深色模式為霓虹深空風格。",
+      "appearanceOptions": {
+        "light": "淺色",
+        "dark": "深色",
+        "system": "跟隨系統"
+      },
       "historyPageRoundsLabel": "歷史分頁輪數",
       "historyPageRoundsPlaceholder": "30",
       "historyPageRoundsHint": "依使用者發起訊息的次數計算對話分頁輪數，使用者發起 30 次訊息，就算 30 輪，不受 AI 回覆條數影響。",

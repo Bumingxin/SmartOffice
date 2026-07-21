@@ -320,6 +320,13 @@
         "zh-TW": "繁體中文",
         "en": "English"
       },
+      "appearanceLabel": "Appearance",
+      "appearanceHint": "Choose the interface theme style. Dark mode features a neon deep-space design.",
+      "appearanceOptions": {
+        "light": "Light",
+        "dark": "Dark",
+        "system": "System"
+      },
       "historyPageRoundsLabel": "History Page Rounds",
       "historyPageRoundsPlaceholder": "30",
       "historyPageRoundsHint": "Conversation pagination rounds are counted by user-started messages only. If the user sends 30 messages, that counts as 30 rounds no matter how many AI replies follow.",

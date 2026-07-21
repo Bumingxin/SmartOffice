@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo, useLayoutEffect } from 'react';
-import { Menu, Plus, X, Search, ChevronUp, ChevronDown, Trash2, Users, Check } from 'lucide-react';
+import { Menu, Plus, X, Search, ChevronUp, ChevronDown, Trash2, Users, Check, MoreVertical, Pencil } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import ReactMarkdown from 'react-markdown';
@@ -19,6 +19,7 @@ import {
 } from '../utils/historyPagination';
 import { ACTIVE_CONTEXT_REFRESH_EVENT, type ActiveContextRefreshDetail } from '../utils/contextRefresh';
 import { getGroupIdValidationKey } from '../utils/groupId';
+import { useTheme } from '../contexts/ThemeContext';
 
 // ============ TYPES ============
 
@@ -805,6 +806,8 @@ function getAgentColor(agentId: string, members: GroupChat['members']): string {
 
 export default function UnifiedChatView(props: UnifiedChatViewProps) {
   const { t, i18n } = useTranslation();
+  const { resolvedTheme } = useTheme();
+  const isDark = resolvedTheme === 'dark';
   const { mode, onMenuClick, sessions } = props;
   const isChat = mode === 'chat';
   const isGroup = mode === 'group';
@@ -3749,7 +3752,8 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
   })();
 
   return (
-    <div className="flex flex-col h-full bg-white relative" onDragEnter={handleDrag} onDragOver={handleDrag} onDragLeave={handleDrag} onDrop={handleDrop}>
+    <div className={`flex flex-col h-full relative ${isDark ? 'deep-space-bg star-field' : 'bg-white'}`} onDragEnter={handleDrag} onDragOver={handleDrag} onDragLeave={handleDrag} onDrop={handleDrop}>
+      {isDark && <div className="star-trails" />}
       {/* Drag overlay */}
       {isDragging && !editingMessageId && (
         <div className="absolute inset-0 z-[100] bg-blue-600/10 backdrop-blur-sm border-4 border-dashed border-blue-500 flex items-center justify-center p-12 transition-all pointer-events-none">
@@ -3764,10 +3768,10 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
       )}
 
       {/* Header */}
-      <header className="h-14 px-4 sm:px-6 border-b border-gray-300 flex items-center justify-between flex-shrink-0 bg-white z-10 w-full relative">
+      <header className={`h-14 px-4 sm:px-6 border-b flex items-center justify-between flex-shrink-0 z-10 w-full relative ${isDark ? 'border-gray-400 bg-gray-100' : 'border-gray-300 bg-white'}`}>
         {!showMobileSearch && (
           <div className="flex items-center space-x-2 sm:space-x-3 flex-shrink-0">
-            <button className="md:hidden text-gray-500 hover:text-gray-900 focus:outline-none pr-1" onClick={onMenuClick}><Menu className="w-6 h-6" /></button>
+            <button className="md:hidden text-gray-500 hover:text-gray-900 focus:outline-none pr-1" onClick={onMenuClick}><MoreVertical className="w-6 h-6" /></button>
             <div className="flex items-center space-x-2 sm:space-x-3">
               <h1 className="text-[17px] sm:text-lg font-bold text-gray-900 leading-tight truncate">{headerTitle}</h1>
               <div className={`flex items-center gap-1 sm:gap-1.5 text-xs sm:text-sm group/badge cursor-default relative ${headerStatus.color}`}>
@@ -3817,7 +3821,7 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
               <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none"><Search className="h-4 w-4 text-gray-400 group-focus-within:text-blue-500 transition-colors" /></div>
               <input type="text" placeholder={isChat ? t('unifiedChat.searchCurrentConversation') : t('unifiedChat.searchGroupConversation')} value={messageSearchQuery} onChange={(e) => setMessageSearchQuery(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); if (e.shiftKey) handlePrevSearch(); else handleNextSearch(); } }}
-                className="block w-full pl-9 pr-24 py-2 rounded-xl border border-gray-200 bg-gray-50 hover:border-gray-300 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-sm font-medium placeholder-gray-400" />
+                className={`block w-full pl-9 pr-24 py-2 rounded-xl border transition-all text-sm font-medium placeholder-gray-400 ${isDark ? 'neon-search-input bg-gray-200 focus:bg-gray-100 focus:outline-none' : 'border-gray-200 bg-gray-50 hover:border-gray-300 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500'}`} />
               {messageSearchQuery && (
                 <div className="absolute inset-y-0 right-0 flex items-center pr-1.5 space-x-1">
                   <span className="text-[11px] font-bold text-gray-400 px-1 border-r border-gray-200 mr-0.5">{searchMatches.length > 0 ? `${currentMatchIndex + 1}/${searchMatches.length}` : '0/0'}</span>
@@ -3832,7 +3836,7 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
       </header>
 
       {/* Message List Area */}
-      <div className="flex-1 flex relative min-h-0">
+      <div className={`flex-1 flex relative min-h-0 ${isDark ? 'neon-chat-frame' : ''}`}>
         {/* Nav dots */}
         {!showMessageListSkeleton && navDots.length > 0 && (
           <div className="hidden md:block absolute inset-y-0 left-0 w-0 z-[60] pointer-events-none">
@@ -3893,7 +3897,7 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
           </div>
         )}
 
-        <div ref={scrollContainerRef} className="flex-1 overflow-y-auto overflow-x-hidden p-4 sm:px-8 sm:py-4 space-y-6 bg-white pb-0 relative">
+        <div ref={scrollContainerRef} className={`flex-1 overflow-y-auto overflow-x-hidden p-4 sm:px-8 sm:py-4 space-y-6 pb-0 relative ${isDark ? 'bg-transparent' : 'bg-white'}`}>
           {showMessageListSkeleton ? (
             <MessageListSkeleton />
           ) : (
@@ -3903,7 +3907,7 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
               {/* Date badge / empty state */}
               {isChat && (
                 <div className="flex justify-center mb-8">
-                  <span className="px-4 py-1.5 bg-[#eff1f4] text-gray-500 text-[11px] rounded-full">
+                  <span className={isDark ? 'neon-date-badge' : 'px-4 py-1.5 bg-[#eff1f4] text-gray-500 text-[11px] rounded-full'}>
                     {messages.length > 0 ? formatMessageDate(messages[0].timestamp) : t('unifiedChat.startConversation')}
                   </span>
                 </div>
@@ -4033,7 +4037,7 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
       </div>
 
       {/* Input Area */}
-      <div className="px-4 sm:px-6 pb-6 sm:pb-4 pt-2 flex-shrink-0 bg-white">
+      <div className={`px-4 sm:px-6 pb-6 sm:pb-4 pt-2 flex-shrink-0 ${isDark ? 'bg-gray-100' : 'bg-white'}`}>
         <div className="max-w-5xl mx-auto flex flex-col gap-3">
           {/* Pending file previews */}
           {pendingFiles.length > 0 && (
@@ -4077,7 +4081,7 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
               </div>
             )}
 
-            <form onSubmit={handleSubmit} className="relative flex flex-col border border-gray-200 rounded-2xl bg-white overflow-visible hover:border-gray-300 focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-500/20 transition-all">
+            <form onSubmit={handleSubmit} className={`relative flex flex-col border rounded-2xl overflow-visible transition-all ${isDark ? 'neon-input-frame bg-gray-200' : 'border-gray-200 bg-white hover:border-gray-300 focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-500/20'}`}>
               {/* Quote preview */}
               {quotedMessage && (
                 <div className="mx-4 mt-3 mb-1 px-3 py-2 bg-gray-100 rounded-lg relative group flex items-start justify-between animate-in fade-in slide-in-from-bottom-2">
@@ -4176,7 +4180,7 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
                 <div className="flex items-center gap-1">
                   <input type="file" ref={fileInputRef} multiple className="hidden" onChange={(e) => handleFileChange(Array.from(e.target.files || []))} />
                   <button type="button" onClick={() => fileInputRef.current?.click()} className="w-9 h-9 flex items-center justify-center rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-all">
-                    <Plus className="w-5 h-5" />
+                    <Pencil className="w-5 h-5" />
                   </button>
                   {isChat && (
                     <button type="button" onClick={() => { if (showCommands) setShowCommands(false); else { setFilteredCommands(allCommands); setCommandIndex(0); setShowCommands(true); } }}
@@ -4206,7 +4210,7 @@ export default function UnifiedChatView(props: UnifiedChatViewProps) {
                   </button>
                 ) : (
                   <button type="submit" disabled={!hasDraftToSend || isLoading || isGroupBusy}
-                    className={`px-4 h-9 flex items-center justify-center rounded-lg transition-all font-bold text-sm ${hasDraftToSend && !isLoading && !isGroupBusy ? 'bg-blue-600 text-white hover:bg-blue-700 active:scale-95' : 'bg-gray-100 text-gray-400 cursor-not-allowed'}`}>
+                    className={`px-4 h-9 flex items-center justify-center rounded-lg transition-all font-bold text-sm ${hasDraftToSend && !isLoading && !isGroupBusy ? (isDark ? 'neon-send-btn active:scale-95' : 'bg-blue-600 text-white hover:bg-blue-700 active:scale-95') : 'bg-gray-100 text-gray-400 cursor-not-allowed'}`}>
                     {isLoading ? t('common.sending') : t('common.send')}
                   </button>
                 )}

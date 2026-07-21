@@ -26,6 +26,495 @@
   --shadow-inner: 0 0 #0000;
 }
 
+/* ============================================================
+   DARK THEME — Deep Space Neon
+   ============================================================ */
+[data-theme="dark"] {
+  --color-gray-50:  #0a0e1a;
+  --color-gray-100: #0d1117;
+  --color-gray-200: #161b22;
+  --color-gray-300: #21262d;
+  --color-gray-400: #30363d;
+  --color-gray-500: #8b949e;
+  --color-gray-600: #c9d1d9;
+  --color-gray-700: #e6edf3;
+  --color-gray-800: #f0f6fc;
+  --color-gray-900: #f0f6fc;
+  --color-gray-950: #ffffff;
+
+  color-scheme: dark;
+}
+
+/* Dark scrollbar */
+[data-theme="dark"] ::-webkit-scrollbar-thumb {
+  background: #30363d;
+}
+[data-theme="dark"] ::-webkit-scrollbar-thumb:hover {
+  background: #484f58;
+}
+
+/* ============================================================
+   NEON COLOR TOKENS
+   ============================================================ */
+:root {
+  --neon-cyan: #00f0ff;
+  --neon-cyan-rgb: 0, 240, 255;
+  --neon-pink: #ff00ff;
+  --neon-pink-rgb: 255, 0, 255;
+  --neon-purple: #a855f7;
+  --neon-purple-rgb: 168, 85, 247;
+  --deep-space-bg: #0a0e1a;
+  --deep-space-mid: #0d1117;
+  --deep-space-surface: #111827;
+}
+
+/* ============================================================
+   NEON UTILITY CLASSES — ENHANCED
+   ============================================================ */
+
+/* Neon border — cyan (simplified) */
+.neon-border-cyan {
+  border: 1px solid rgba(var(--neon-cyan-rgb), 0.25);
+  box-shadow:
+    0 0 8px rgba(var(--neon-cyan-rgb), 0.2),
+    0 0 20px rgba(var(--neon-cyan-rgb), 0.1);
+}
+
+/* Neon border — pink (simplified) */
+.neon-border-pink {
+  border: 1px solid rgba(var(--neon-pink-rgb), 0.25);
+  box-shadow:
+    0 0 8px rgba(var(--neon-pink-rgb), 0.2),
+    0 0 20px rgba(var(--neon-pink-rgb), 0.1);
+}
+
+/* Neon border — dual (simplified) */
+.neon-border-dual {
+  border: 1px solid rgba(var(--neon-cyan-rgb), 0.2);
+  box-shadow:
+    0 0 8px rgba(var(--neon-cyan-rgb), 0.15),
+    0 0 20px rgba(var(--neon-pink-rgb), 0.08);
+}
+
+/* Neon glow pulse (simplified) */
+.neon-glow-cyan {
+  box-shadow:
+    0 0 8px rgba(var(--neon-cyan-rgb), 0.3),
+    0 0 20px rgba(var(--neon-cyan-rgb), 0.15);
+}
+.neon-glow-pink {
+  box-shadow:
+    0 0 8px rgba(var(--neon-pink-rgb), 0.3),
+    0 0 20px rgba(var(--neon-pink-rgb), 0.15);
+}
+
+/* Neon text glow (simplified) */
+.neon-text-cyan {
+  color: var(--neon-cyan);
+  text-shadow:
+    0 0 4px rgba(var(--neon-cyan-rgb), 0.6),
+    0 0 10px rgba(var(--neon-cyan-rgb), 0.3);
+}
+.neon-text-pink {
+  color: var(--neon-pink);
+  text-shadow:
+    0 0 4px rgba(var(--neon-pink-rgb), 0.6),
+    0 0 10px rgba(var(--neon-pink-rgb), 0.3);
+}
+
+/* Deep space background */
+.deep-space-bg {
+  background: linear-gradient(180deg, #080c16 0%, #0a0e1a 30%, #0d1117 60%, #0f172a 100%);
+}
+
+/* Glass panel (dark) */
+.dark-glass {
+  background: rgba(10, 14, 26, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+/* Angled / chamfered panel */
+.chamfered-panel {
+  clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 12px 100%, 0 calc(100% - 12px));
+}
+
+/* Neon gradient button (simplified) */
+.neon-btn-gradient {
+  background: linear-gradient(135deg, var(--neon-pink), var(--neon-cyan));
+  color: #fff;
+  border: none;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.3);
+}
+.neon-btn-gradient:hover {
+  box-shadow:
+    0 0 10px rgba(var(--neon-pink-rgb), 0.4),
+    0 0 20px rgba(var(--neon-cyan-rgb), 0.3);
+}
+
+/* Metallic neon title plate — simplified */
+.neon-title-plate {
+  background: linear-gradient(135deg, rgba(var(--neon-cyan-rgb), 0.06), rgba(var(--neon-pink-rgb), 0.04));
+  border: 1px solid rgba(var(--neon-cyan-rgb), 0.2);
+}
+.neon-title-plate .neon-title-text {
+  color: #e2e8f0;
+  text-shadow:
+    0 0 4px rgba(var(--neon-cyan-rgb), 0.5),
+    0 0 10px rgba(var(--neon-cyan-rgb), 0.2);
+}
+
+/* ============================================================
+   NEW: Chat frame, Input frame, Sidebar border, Date divider
+   ============================================================ */
+
+/* Chat area — minimal border */
+.neon-chat-frame {
+  border: 1px solid rgba(var(--neon-cyan-rgb), 0.08);
+  border-radius: 12px;
+}
+
+/* Input area — minimal border */
+.neon-input-frame {
+  border: 1px solid rgba(var(--neon-cyan-rgb), 0.15) !important;
+  border-radius: 16px !important;
+}
+
+/* Sidebar right border — subtle neon line (simplified) */
+.neon-sidebar-border {
+  border-right: 1px solid rgba(var(--neon-cyan-rgb), 0.15) !important;
+}
+
+/* Date divider — subtle neon line */
+.neon-date-divider {
+  position: relative;
+  border: none !important;
+  height: 1px !important;
+  background: linear-gradient(90deg, transparent, rgba(var(--neon-cyan-rgb), 0.15), rgba(var(--neon-pink-rgb), 0.1), transparent) !important;
+  box-shadow: 0 0 6px rgba(var(--neon-cyan-rgb), 0.1);
+}
+
+/* Date badge with glowing line extending outward (simplified) */
+.neon-date-badge {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 16px;
+  border-radius: 9999px;
+  font-size: 11px;
+  color: #c9d1d9;
+  background: rgba(13, 17, 23, 0.6);
+  border: 1px solid rgba(var(--neon-cyan-rgb), 0.15);
+}
+.neon-date-badge::before,
+.neon-date-badge::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  width: 60px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(var(--neon-cyan-rgb), 0.2), transparent);
+}
+.neon-date-badge::before {
+  right: 100%;
+  margin-right: 8px;
+}
+.neon-date-badge::after {
+  left: 100%;
+  margin-left: 8px;
+}
+
+/* Send button glow — fluorescent purple */
+.neon-send-btn {
+  background: linear-gradient(135deg, #a855f7, #7c3aed) !important;
+  color: #fff !important;
+  border: none !important;
+  box-shadow:
+    0 0 8px rgba(var(--neon-purple-rgb), 0.5),
+    0 0 20px rgba(var(--neon-purple-rgb), 0.3);
+}
+.neon-send-btn:hover {
+  background: linear-gradient(135deg, #b865ff, #8b5cf6) !important;
+  box-shadow:
+    0 0 12px rgba(var(--neon-purple-rgb), 0.7),
+    0 0 30px rgba(var(--neon-purple-rgb), 0.4),
+    0 0 50px rgba(var(--neon-purple-rgb), 0.2);
+}
+
+/* AI message bubble glow */
+.neon-ai-bubble {
+  border: 1px solid rgba(var(--neon-cyan-rgb), 0.15) !important;
+  box-shadow:
+    0 0 8px rgba(var(--neon-cyan-rgb), 0.08),
+    inset 0 0 4px rgba(var(--neon-cyan-rgb), 0.03);
+}
+
+/* AI reply content border — formal reply area (simplified) */
+.neon-ai-reply {
+  border: 1px solid rgba(var(--neon-cyan-rgb), 0.15) !important;
+  border-radius: 12px;
+  padding: 12px 16px;
+  background: rgba(13, 17, 23, 0.4) !important;
+}
+
+/* Thinking process box — different color (pink/magenta), simplified */
+.neon-process-box {
+  border: 1px solid rgba(var(--neon-pink-rgb), 0.2) !important;
+  background: rgba(20, 10, 25, 0.5) !important;
+}
+.neon-process-box .process-header {
+  background: rgba(236, 72, 153, 0.06) !important;
+  border-bottom-color: rgba(var(--neon-pink-rgb), 0.12) !important;
+}
+.neon-process-box .process-header:hover {
+  background: rgba(236, 72, 153, 0.1) !important;
+}
+
+/* Action buttons glow — auto-apply to all hover-able buttons in dark mode */
+[data-theme="dark"] .group:hover .text-gray-400:hover {
+  color: var(--neon-cyan) !important;
+  text-shadow: 0 0 6px rgba(var(--neon-cyan-rgb), 0.5);
+}
+[data-theme="dark"] .group:hover .text-gray-400:hover.text-red-500 {
+  color: #f87171 !important;
+  text-shadow: 0 0 6px rgba(248, 113, 113, 0.5);
+}
+
+/* Search input glow (simplified) */
+.neon-search-input {
+  border: 1px solid rgba(var(--neon-cyan-rgb), 0.12) !important;
+}
+.neon-search-input:focus {
+  border-color: rgba(var(--neon-cyan-rgb), 0.25) !important;
+}
+
+/* File card glow (simplified) */
+.neon-file-card {
+  border: 1px solid rgba(var(--neon-cyan-rgb), 0.12);
+}
+
+/* ============================================================
+   STAR FIELD — Pure CSS, 3 layers, pointer-events: none
+   ENHANCED: larger particles, higher opacity, more dots
+   ============================================================ */
+
+/* Layer 1: Static star dots — subtle starfield */
+[data-theme="dark"] .star-field::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image:
+    /* 白色星点 — 中等 */
+    radial-gradient(1.5px 1.5px at 8% 15%, rgba(255,255,255,0.7) 0%, transparent 100%),
+    radial-gradient(2px 2px at 22% 42%, rgba(255,255,255,0.6) 0%, transparent 100%),
+    radial-gradient(1px 1px at 35% 8%, rgba(255,255,255,0.75) 0%, transparent 100%),
+    radial-gradient(1.5px 1.5px at 48% 65%, rgba(255,255,255,0.5) 0%, transparent 100%),
+    radial-gradient(2px 2px at 62% 28%, rgba(255,255,255,0.65) 0%, transparent 100%),
+    radial-gradient(1.5px 1.5px at 75% 52%, rgba(255,255,255,0.55) 0%, transparent 100%),
+    radial-gradient(1px 1px at 88% 18%, rgba(255,255,255,0.7) 0%, transparent 100%),
+    radial-gradient(1.5px 1.5px at 12% 72%, rgba(255,255,255,0.45) 0%, transparent 100%),
+    radial-gradient(2px 2px at 55% 85%, rgba(255,255,255,0.5) 0%, transparent 100%),
+    radial-gradient(1px 1px at 92% 75%, rgba(255,255,255,0.6) 0%, transparent 100%),
+    /* 白色星点 — 小 */
+    radial-gradient(0.8px 0.8px at 5% 45%, rgba(255,255,255,0.4) 0%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 18% 88%, rgba(255,255,255,0.35) 0%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 42% 35%, rgba(255,255,255,0.4) 0%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 68% 72%, rgba(255,255,255,0.35) 0%, transparent 100%),
+    /* 青蓝色星点 — 少量点缀 */
+    radial-gradient(1.5px 1.5px at 15% 30%, rgba(var(--neon-cyan-rgb), 0.4) 0%, transparent 100%),
+    radial-gradient(2px 2px at 58% 15%, rgba(var(--neon-cyan-rgb), 0.35) 0%, transparent 100%),
+    radial-gradient(1px 1px at 78% 82%, rgba(var(--neon-cyan-rgb), 0.3) 0%, transparent 100%),
+    /* 紫红色星点 — 少量点缀 */
+    radial-gradient(1.5px 1.5px at 28% 78%, rgba(var(--neon-pink-rgb), 0.3) 0%, transparent 100%),
+    radial-gradient(1px 1px at 72% 38%, rgba(var(--neon-pink-rgb), 0.25) 0%, transparent 100%);
+  opacity: 0.85;
+}
+
+/* Layer 2: Floating debris / slow drift — visible angular fragments */
+[data-theme="dark"] .star-field::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image:
+    radial-gradient(6px 3px at 18% 25%, rgba(var(--neon-cyan-rgb), 0.4) 0%, transparent 100%),
+    radial-gradient(4px 4px at 62% 18%, rgba(var(--neon-pink-rgb), 0.35) 0%, transparent 100%),
+    radial-gradient(8px 2px at 42% 65%, rgba(var(--neon-purple-rgb), 0.3) 0%, transparent 100%),
+    radial-gradient(5px 3px at 78% 48%, rgba(var(--neon-cyan-rgb), 0.32) 0%, transparent 100%),
+    radial-gradient(6px 1.5px at 25% 55%, rgba(var(--neon-pink-rgb), 0.28) 0%, transparent 100%),
+    radial-gradient(3px 5px at 85% 72%, rgba(var(--neon-cyan-rgb), 0.3) 0%, transparent 100%),
+    radial-gradient(4px 2px at 35% 40%, rgba(var(--neon-purple-rgb), 0.25) 0%, transparent 100%),
+    radial-gradient(5px 2px at 70% 60%, rgba(var(--neon-cyan-rgb), 0.28) 0%, transparent 100%);
+  animation: star-drift 40s linear infinite;
+}
+
+/* Layer 3: Light trail streaks — visible glowing trails */
+[data-theme="dark"] .star-field .star-trails {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  overflow: hidden;
+}
+[data-theme="dark"] .star-field .star-trails::before {
+  content: '';
+  position: absolute;
+  top: 22%;
+  left: -10%;
+  width: 50%;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, rgba(var(--neon-cyan-rgb), 0.4), transparent);
+  box-shadow: 0 0 8px rgba(var(--neon-cyan-rgb), 0.2);
+  animation: trail-slide 15s ease-in-out infinite;
+}
+[data-theme="dark"] .star-field .star-trails::after {
+  content: '';
+  position: absolute;
+  top: 68%;
+  left: -15%;
+  width: 45%;
+  height: 1.5px;
+  background: linear-gradient(90deg, transparent, rgba(var(--neon-pink-rgb), 0.3), transparent);
+  box-shadow: 0 0 6px rgba(var(--neon-pink-rgb), 0.15);
+  animation: trail-slide 22s ease-in-out infinite reverse;
+}
+
+@keyframes star-drift {
+  0%   { transform: translate(0, 0) rotate(0deg); }
+  25%  { transform: translate(12px, -8px) rotate(0.8deg); }
+  50%  { transform: translate(-5px, 15px) rotate(-0.5deg); }
+  75%  { transform: translate(8px, 5px) rotate(0.3deg); }
+  100% { transform: translate(0, 0) rotate(0deg); }
+}
+
+@keyframes trail-slide {
+  0%   { transform: translateX(0); opacity: 0; }
+  15%  { opacity: 0.3; }
+  85%  { opacity: 0.3; }
+  100% { transform: translateX(120vw); opacity: 0; }
+}
+
+/* ============================================================
+   DARK THEME — Prose / Markdown content overrides
+   ============================================================ */
+[data-theme="dark"] .prose,
+[data-theme="dark"] .prose-sm {
+  color: #e2e8f0;
+}
+[data-theme="dark"] .prose h1,
+[data-theme="dark"] .prose h2,
+[data-theme="dark"] .prose h3,
+[data-theme="dark"] .prose h4,
+[data-theme="dark"] .prose h5,
+[data-theme="dark"] .prose h6 {
+  color: #f0f6fc;
+}
+[data-theme="dark"] .prose a,
+[data-theme="dark"] .prose-sm a {
+  color: var(--neon-cyan);
+}
+[data-theme="dark"] .prose code,
+[data-theme="dark"] .prose-sm code {
+  color: #e6edf3;
+  background: #161b22;
+}
+[data-theme="dark"] .prose pre,
+[data-theme="dark"] .prose-sm pre {
+  background: #0d1117;
+  border: 1px solid #21262d;
+  color: #e6edf3;
+}
+[data-theme="dark"] .prose blockquote,
+[data-theme="dark"] .prose-sm blockquote {
+  border-left-color: rgba(var(--neon-cyan-rgb), 0.4);
+  color: #c9d1d9;
+}
+[data-theme="dark"] .prose table,
+[data-theme="dark"] .prose-sm table {
+  border-color: #21262d;
+}
+[data-theme="dark"] .prose th,
+[data-theme="dark"] .prose td,
+[data-theme="dark"] .prose-sm th,
+[data-theme="dark"] .prose-sm td {
+  border-color: #21262d;
+}
+[data-theme="dark"] .prose hr,
+[data-theme="dark"] .prose-sm hr {
+  border-color: #21262d;
+}
+
+/* ============================================================
+   DARK THEME — Override hardcoded light bg/text in components
+   ============================================================ */
+
+/* bg-white override */
+[data-theme="dark"] .bg-white { background-color: #0d1117 !important; }
+[data-theme="dark"] .bg-gray-50 { background-color: #0a0e1a !important; }
+[data-theme="dark"] .bg-gray-100 { background-color: #0d1117 !important; }
+[data-theme="dark"] .bg-gray-200\/80 { background-color: rgba(22, 27, 34, 0.8) !important; }
+[data-theme="dark"] .bg-gray-200 { background-color: #161b22 !important; }
+[data-theme="dark"] .bg-gray-50\/50 { background-color: rgba(10, 14, 26, 0.5) !important; }
+[data-theme="dark"] .bg-gray-50\/80 { background-color: rgba(10, 14, 26, 0.8) !important; }
+[data-theme="dark"] .bg-gray-50\/30 { background-color: rgba(10, 14, 26, 0.3) !important; }
+[data-theme="dark"] .bg-gray-100\/50 { background-color: rgba(13, 17, 23, 0.5) !important; }
+[data-theme="dark"] .bg-gray-100\/80 { background-color: rgba(13, 17, 23, 0.8) !important; }
+
+/* text overrides */
+[data-theme="dark"] .text-gray-900 { color: #f0f6fc !important; }
+[data-theme="dark"] .text-gray-800 { color: #e6edf3 !important; }
+[data-theme="dark"] .text-gray-700 { color: #c9d1d9 !important; }
+[data-theme="dark"] .text-gray-600 { color: #c9d1d9 !important; }
+[data-theme="dark"] .text-gray-500 { color: #8b949e !important; }
+[data-theme="dark"] .text-gray-400 { color: #8b949e !important; }
+
+/* border overrides */
+[data-theme="dark"] .border-gray-200 { border-color: #21262d !important; }
+[data-theme="dark"] .border-gray-300 { border-color: #30363d !important; }
+[data-theme="dark"] .border-gray-100 { border-color: #161b22 !important; }
+[data-theme="dark"] .border-gray-400 { border-color: #30363d !important; }
+
+/* Amber accent (sidebar active) — dark variant */
+[data-theme="dark"] .bg-amber-50 { background-color: rgba(var(--neon-cyan-rgb), 0.08) !important; }
+[data-theme="dark"] .border-orange-300 { border-color: rgba(var(--neon-cyan-rgb), 0.4) !important; }
+
+/* Blue accent adjustments for dark */
+[data-theme="dark"] .bg-blue-600 { background-color: #1d4ed8 !important; }
+[data-theme="dark"] .bg-blue-50 { background-color: rgba(29, 78, 216, 0.15) !important; }
+[data-theme="dark"] .text-blue-600 { color: #60a5fa !important; }
+[data-theme="dark"] .bg-blue-50\/50 { background-color: rgba(29, 78, 216, 0.1) !important; }
+
+/* Red accent for dark */
+[data-theme="dark"] .text-red-500 { color: #f87171 !important; }
+[data-theme="dark"] .bg-red-50 { background-color: rgba(248, 113, 113, 0.1) !important; }
+[data-theme="dark"] .bg-red-50\/50 { background-color: rgba(248, 113, 113, 0.08) !important; }
+
+/* Green accent for dark */
+[data-theme="dark"] .text-green-600 { color: #4ade80 !important; }
+[data-theme="dark"] .bg-green-50 { background-color: rgba(74, 222, 128, 0.1) !important; }
+[data-theme="dark"] .border-green-100 { border-color: rgba(74, 222, 128, 0.2) !important; }
+
+/* Focus ring — neon cyan in dark mode */
+[data-theme="dark"] .focus\:ring-blue-500\/20:focus { --tw-ring-color: rgba(var(--neon-cyan-rgb), 0.25) !important; }
+[data-theme="dark"] .focus\:border-blue-500:focus { border-color: var(--neon-cyan) !important; }
+[data-theme="dark"] .focus\:border-blue-400:focus { border-color: var(--neon-cyan) !important; }
+[data-theme="dark"] .focus-within\:border-blue-500:focus-within { border-color: var(--neon-cyan) !important; }
+[data-theme="dark"] .focus-within\:ring-blue-500\/20:focus-within { --tw-ring-color: rgba(var(--neon-cyan-rgb), 0.25) !important; }
+
+/* Syntax highlighter overrides for dark mode */
+[data-theme="dark"] .react-syntax-highlighter,
+[data-theme="dark"] pre[class*="language-"] {
+  background: #0d1117 !important;
+  color: #e6edf3 !important;
+}
+
+/* ============================================================
+   GLOBAL STYLES
+   ============================================================ */
+
 html,
 body,
 #root {
@@ -109,7 +598,7 @@ a:disabled {
 .quote-content-inner h5,
 .quote-content-inner h6 {
   margin-top: 0 !important;
-  margin-bottom: 0.4em !important; /* 1.6 line-height * 0.25 = 0.4em for tighter quote spacing */
+  margin-bottom: 0.4em !important;
   white-space: normal !important;
   line-height: 1.6 !important;
 }

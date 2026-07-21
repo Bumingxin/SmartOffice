@@ -6,6 +6,7 @@ import { ViewType, SettingsTab } from '../App';
 import { requestActiveContextRefresh } from '../utils/contextRefresh';
 import { getGroupIdValidationKey } from '../utils/groupId';
 import ModelFallbackEditor, { type ModelFallbackMode } from './ModelFallbackEditor';
+import { useTheme } from '../contexts/ThemeContext';
 
 interface SidebarProps {
   currentView: ViewType;
@@ -212,6 +213,28 @@ function SessionSkeleton() {
 }
 
 function SidebarHeader({ openclawVersion, appVersion }: { openclawVersion: string; appVersion: string }) {
+  const { resolvedTheme } = useTheme();
+  const isDark = resolvedTheme === 'dark';
+
+  if (isDark) {
+    return (
+      <div className="pt-4 pb-6 px-6">
+        <div className="neon-title-plate rounded-xl px-4 py-3 mb-2">
+          <div className="neon-title-text text-2xl font-black tracking-tighter leading-tight">SmartOffice</div>
+          {appVersion ? (
+            <div className="text-[0.8rem] font-medium text-gray-500 leading-none mt-1">{appVersion}</div>
+          ) : null}
+        </div>
+        <div className="flex items-baseline gap-2 whitespace-nowrap leading-none px-1">
+          <div className="neon-text-cyan text-[1.15rem] font-bold tracking-widest uppercase leading-tight">OpenClaw</div>
+          {openclawVersion ? (
+            <div className="text-[0.8rem] font-medium text-gray-500 leading-none">{openclawVersion}</div>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="pt-4 pb-6 px-6">
       <div className="mb-1 flex items-baseline gap-2 whitespace-nowrap leading-none">
@@ -247,6 +270,8 @@ export default function Sidebar({
   onSelectGroup
 }: SidebarProps) {
   const { t, i18n } = useTranslation();
+  const { resolvedTheme } = useTheme();
+  const isDark = resolvedTheme === 'dark';
   const [appVersionInfo, setAppVersionInfo] = useState<AppVersionInfo | null>(null);
 
   useEffect(() => {
@@ -1258,7 +1283,7 @@ export default function Sidebar({
             onClick={() => navigateTo(currentView, settingsTab, false)} 
           />
         )}
-        <aside className={`fixed inset-y-0 left-0 z-50 w-[75vw] md:w-64 flex-shrink-0 flex-col border-r border-gray-200 bg-gray-100 h-full transition-transform duration-300 md:relative md:translate-x-0 md:flex ${isMobileMenuOpen ? 'translate-x-0 flex' : '-translate-x-full hidden'}`}>
+        <aside className={`fixed inset-y-0 left-0 z-50 w-[75vw] md:w-64 flex-shrink-0 flex-col h-full transition-transform duration-300 md:relative md:translate-x-0 md:flex ${isMobileMenuOpen ? 'translate-x-0 flex' : '-translate-x-full hidden'} ${isDark ? 'neon-sidebar-border bg-gray-100' : 'border-r border-gray-200 bg-gray-100'}`}>
           <SidebarHeader
             openclawVersion={appVersionInfo?.openclawVersion || ''}
             appVersion={appVersionInfo?.version || ''}
@@ -1337,7 +1362,7 @@ export default function Sidebar({
           onClick={() => navigateTo(currentView, settingsTab, false)} 
         />
       )}
-      <aside className={`fixed inset-y-0 left-0 z-50 w-[75vw] md:w-64 flex-shrink-0 flex-col border-r border-gray-200 bg-gray-100 h-full transition-transform duration-300 md:relative md:translate-x-0 md:flex ${isMobileMenuOpen ? 'translate-x-0 flex' : '-translate-x-full hidden'}`}>
+      <aside className={`fixed inset-y-0 left-0 z-50 w-[75vw] md:w-64 flex-shrink-0 flex-col h-full transition-transform duration-300 md:relative md:translate-x-0 md:flex ${isMobileMenuOpen ? 'translate-x-0 flex' : '-translate-x-full hidden'} ${isDark ? 'neon-sidebar-border bg-gray-100' : 'border-r border-gray-200 bg-gray-100'}`}>
         <SidebarHeader
           openclawVersion={appVersionInfo?.openclawVersion || ''}
           appVersion={appVersionInfo?.version || ''}

@@ -4,6 +4,7 @@ import UnifiedChatView from './components/UnifiedChatView';
 import SettingsView from './components/SettingsView';
 import LoginScreen from './components/LoginScreen';
 import { requestActiveContextRefresh, type ActiveContextRefreshDetail } from './utils/contextRefresh';
+import { useTheme } from './contexts/ThemeContext';
 
 export type ViewType = 'chat' | 'settings' | 'groups';
 export type SettingsTab = 'gateway' | 'general' | 'models' | 'commands' | 'about';
@@ -41,6 +42,7 @@ async function fetchJsonWithTimeout<T>(input: RequestInfo | URL, init?: RequestI
 }
 
 export default function App() {
+  const { resolvedTheme } = useTheme();
   const connectionFailureCountRef = useRef(0);
   const connectionRetryTimerRef = useRef<number | null>(null);
   const latestIsConnectedRef = useRef(false);
@@ -377,7 +379,7 @@ export default function App() {
 
   return (
     <div
-      className="flex fixed inset-0 h-[100dvh] w-full overflow-hidden bg-gray-50 text-gray-900 font-sans antialiased"
+      className={`flex fixed inset-0 h-[100dvh] w-full overflow-hidden font-sans antialiased ${resolvedTheme === 'dark' ? 'deep-space-bg text-gray-700' : 'bg-gray-50 text-gray-900'}`}
     >
       <Sidebar 
         currentView={currentView} 

@@ -1,6 +1,7 @@
 import React from 'react';
 import { Check, Copy, Trash2, RefreshCw, Quote, X, Download, ChevronDown, ChevronUp, ExternalLink } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { useTheme } from '../../contexts/ThemeContext';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
@@ -970,6 +971,7 @@ export const ProcessStepBlock = ({
   onPreview,
   processStartTag,
   processEndTag,
+  isDark,
 }: {
   content: string,
   initiallyExpanded: boolean,
@@ -980,6 +982,7 @@ export const ProcessStepBlock = ({
   onPreview?: (url: string, filename: string) => void,
   processStartTag?: string,
   processEndTag?: string,
+  isDark?: boolean,
 }) => {
   const { t } = useTranslation();
   const normalizedSearchQuery = searchQuery?.trim() || '';
@@ -1261,10 +1264,10 @@ export const ProcessStepBlock = ({
   };
 
   return (
-    <div className={`process-step-container flex flex-col ${isDense ? 'my-1.5' : 'mt-1 mb-4'} w-fit max-w-full min-w-[200px] border border-gray-300 rounded-xl overflow-hidden bg-white transition-colors leading-normal`}>
+    <div className={`process-step-container flex flex-col ${isDense ? 'my-1.5' : 'mt-1 mb-4'} w-fit max-w-full min-w-[200px] border rounded-xl overflow-hidden transition-colors leading-normal ${isDark ? 'neon-process-box' : 'border-gray-300 bg-white'}`}>
       <button
         onClick={() => setIsExpanded(!isExpanded)}
-        className={`flex items-center justify-between px-3 py-2 w-full bg-[#f2fbf4] hover:bg-[#e6f7ea] transition-colors cursor-pointer outline-none ${isExpanded ? 'border-b border-gray-300' : ''}`}
+        className={`process-header flex items-center justify-between px-3 py-2 w-full transition-colors cursor-pointer outline-none ${isDark ? '' : 'bg-[#f2fbf4] hover:bg-[#e6f7ea]'} ${isExpanded ? (isDark ? 'border-b border-pink-500/15' : 'border-b border-gray-300') : ''}`}
       >
         <div className="flex items-center gap-2">
           <div className="flex-shrink-0 flex items-center justify-center pl-0.5 pr-1">
@@ -1281,7 +1284,7 @@ export const ProcessStepBlock = ({
         </div>
       </button>
       {isExpanded && (
-        <div className="px-3 py-2.5 bg-white">
+        <div className={`px-3 py-2.5 ${isDark ? 'bg-transparent' : 'bg-white'}`}>
           <div className="text-[13.5px] font-sans text-[#444] break-all prose prose-sm max-w-none" style={{ lineHeight: '1.6' }}>
              <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} components={processMarkdownComponents}>
                {normalizedContent}
@@ -1514,6 +1517,8 @@ const MessageBubbleInner: React.FC<MessageProps> = ({
   preserveProcessExpansionWhenNotLatest
 }) => {
   const { t, i18n } = useTranslation();
+  const { resolvedTheme } = useTheme();
+  const isDark = resolvedTheme === 'dark';
   const currentLocale = normalizeLanguage(i18n.resolvedLanguage || i18n.language);
   const normalizedSearchQuery = searchQuery?.trim() || '';
   const canAcceptEditFileDrop = Boolean(isEditing && onDropNewFiles && onSetEditIsDragging);
@@ -1683,11 +1688,23 @@ const MessageBubbleInner: React.FC<MessageProps> = ({
     <div key={id}>
       {showDateDivider && (
         <div className="flex items-center justify-center my-8 gap-4">
-          <div className="h-px bg-gray-100 flex-1"></div>
-          <span className="px-4 py-1.5 bg-[#eff1f4] text-gray-500 text-[11px] rounded-full">
-            {timestamp.toLocaleDateString(currentLocale, { year: 'numeric', month: 'long', day: 'numeric' })}
-          </span>
-          <div className="h-px bg-gray-100 flex-1"></div>
+          {isDark ? (
+            <>
+              <div className="h-px flex-1 bg-gradient-to-r from-transparent via-cyan-500/30 to-transparent"></div>
+              <span className="neon-date-badge">
+                {timestamp.toLocaleDateString(currentLocale, { year: 'numeric', month: 'long', day: 'numeric' })}
+              </span>
+              <div className="h-px flex-1 bg-gradient-to-l from-transparent via-cyan-500/30 to-transparent"></div>
+            </>
+          ) : (
+            <>
+              <div className="h-px bg-gray-100 flex-1"></div>
+              <span className="px-4 py-1.5 bg-[#eff1f4] text-gray-500 text-[11px] rounded-full">
+                {timestamp.toLocaleDateString(currentLocale, { year: 'numeric', month: 'long', day: 'numeric' })}
+              </span>
+              <div className="h-px bg-gray-100 flex-1"></div>
+            </>
+          )}
         </div>
       )}
 	      
@@ -1732,8 +1749,8 @@ const MessageBubbleInner: React.FC<MessageProps> = ({
 
           <div className={`group relative text-[16px] leading-[1.6] transition-all duration-300 w-full ${
             role === 'user' 
-              ? `text-[#1f2937] border ${isEditing ? 'p-1' : 'px-5 py-3'} rounded-[20px] rounded-tr-[4px] ${isHighlighted ? 'bg-[#f7fbff] border-blue-300' : 'bg-gray-50 border-gray-200'}`
-              : `text-[#1f2937] border-none p-0 bg-transparent`
+              ? `${isDark ? 'text-gray-700' : 'text-[#1f2937]'} border ${isEditing ? 'p-1' : 'px-5 py-3'} rounded-[20px] rounded-tr-[4px] ${isHighlighted ? (isDark ? 'bg-cyan-500/10 border-cyan-500/40' : 'bg-[#f7fbff] border-blue-300') : (isDark ? 'bg-gray-200 border-gray-400' : 'bg-gray-50 border-gray-200')}`
+              : `${isDark ? 'text-gray-700' : 'text-[#1f2937]'} border-none p-0 bg-transparent`
           }`}>
             {isEditing ? (
               <div 
@@ -1842,7 +1859,7 @@ const MessageBubbleInner: React.FC<MessageProps> = ({
                 </div>
               </div>
             ) : (
-              <div className={`prose prose-sm max-w-none prose-slate text-[16px] pb-1 ${role === 'user' ? 'prose-pre:bg-gray-50' : (isHighlighted ? 'prose-pre:bg-[#f7fbff]' : 'prose-pre:bg-gray-50')}`}>
+              <div className={`prose prose-sm max-w-none prose-slate text-[16px] pb-1 ${role === 'user' ? 'prose-pre:bg-gray-50' : (isDark ? 'neon-ai-reply' : (isHighlighted ? 'prose-pre:bg-[#f7fbff]' : 'prose-pre:bg-gray-50'))}`}>
                 {shouldRenderExplicitProcessBlock ? (
                   <ProcessStepBlock
                     content={explicitProcessContent}

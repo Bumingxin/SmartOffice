@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { X, Download, Loader2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { useTheme } from '../contexts/ThemeContext';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
@@ -605,6 +606,8 @@ function HtmlFrameViewer({ src }: { src: string }) {
   const [preview, setPreview] = useState<PreviewState>({ status: 'loading' });
   const [viewMode, setViewMode] = useState<'source' | 'render'>(() => getDefaultViewMode(filename));
   const { t } = useTranslation();
+  const { resolvedTheme } = useTheme();
+  const isDark = resolvedTheme === 'dark';
   const previewUrl = buildPreviewUrl(url);
 
   useEffect(() => {
@@ -843,9 +846,9 @@ function HtmlFrameViewer({ src }: { src: string }) {
       className="fixed inset-0 z-[200] bg-slate-500/60 backdrop-blur-md flex flex-col animate-in fade-in duration-200"
       onClick={handleClose}
     >
-      {/* Top toolbar - Light Theme */}
+      {/* Top toolbar */}
       <div 
-        className="flex items-center justify-between gap-3 px-3 sm:px-6 py-2.5 bg-white/95 border-b border-gray-200 flex-shrink-0"
+        className={`flex items-center justify-between gap-3 px-3 sm:px-6 py-2.5 border-b flex-shrink-0 ${isDark ? 'bg-gray-100/95 border-gray-400' : 'bg-white/95 border-gray-200'}`}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex flex-1 min-w-0 items-center gap-2 sm:gap-3">

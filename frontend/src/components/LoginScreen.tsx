@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useTheme } from '../contexts/ThemeContext';
 
 interface LoginScreenProps {
   onLoginSuccess: () => void;
@@ -42,6 +43,8 @@ function resolveLoginErrorMessage(data: LoginErrorResponse, t: (key: string, opt
 
 export default function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
   const { t } = useTranslation();
+  const { resolvedTheme } = useTheme();
+  const isDark = resolvedTheme === 'dark';
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -74,18 +77,19 @@ export default function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50">
-      <div className="w-full max-w-sm mx-4">
+    <div className={`min-h-screen flex items-center justify-center ${isDark ? 'deep-space-bg star-field relative' : 'bg-gray-50'}`}>
+      {isDark && <div className="star-trails" />}
+      <div className="w-full max-w-sm mx-4 relative z-10">
         <div className="mb-8 flex justify-center">
-          <div>
-            <div className="text-2xl font-black text-gray-900 tracking-tighter leading-tight mb-1">SmartOffice</div>
-            <div className="text-2xl font-bold text-gray-400 tracking-widest uppercase leading-tight">MingYuan</div>
+          <div className={isDark ? 'neon-title-plate rounded-xl px-6 py-4' : ''}>
+            <div className={`text-2xl font-black tracking-tighter leading-tight mb-1 ${isDark ? 'neon-title-text' : 'text-gray-900'}`}>SmartOffice</div>
+            <div className={`text-2xl font-bold tracking-widest uppercase leading-tight ${isDark ? 'neon-text-cyan' : 'text-gray-400'}`}>MingYuan</div>
           </div>
         </div>
 
-        <form onSubmit={handleSubmit} className="bg-white rounded-2xl border border-gray-200 p-6 space-y-5">
+        <form onSubmit={handleSubmit} className={`rounded-2xl p-6 space-y-5 ${isDark ? 'dark-glass neon-border-dual' : 'bg-white border border-gray-200'}`}>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">请输入登录密码</label>
+            <label className={`block text-sm font-medium mb-2 ${isDark ? 'text-gray-600' : 'text-gray-700'}`}>请输入登录密码</label>
             <input
               type="password"
               value={password}
@@ -93,12 +97,12 @@ export default function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
               onKeyDown={(e) => { if (e.key === 'Enter') handleSubmit(e); }}
               placeholder="输入密码..."
               autoFocus
-              className="block w-full px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400 transition-all text-sm"
+              className={`block w-full px-4 py-3 rounded-xl border transition-all text-sm ${isDark ? 'border-gray-400 bg-gray-200 focus:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-cyan-400' : 'border-gray-200 bg-gray-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400'}`}
             />
           </div>
 
           {error && (
-            <div className="text-sm text-red-500 font-medium bg-red-50 px-3 py-2 rounded-lg">
+            <div className={`text-sm text-red-500 font-medium px-3 py-2 rounded-lg ${isDark ? 'bg-red-500/10' : 'bg-red-50'}`}>
               {error}
             </div>
           )}
@@ -106,7 +110,7 @@ export default function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
           <button
             type="submit"
             disabled={isLoading || !password}
-            className="w-full py-3 text-sm font-semibold rounded-xl text-white bg-blue-600 hover:bg-blue-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            className={`w-full py-3 text-sm font-semibold rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed ${isDark ? 'neon-btn-gradient' : 'text-white bg-blue-600 hover:bg-blue-700'}`}
           >
             {isLoading ? '验证中...' : '登 录'}
           </button>
